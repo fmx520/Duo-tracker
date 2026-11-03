@@ -6,6 +6,7 @@ from pathlib import Path
 import yaml
 
 from .catalog import CARRIERS, Model, resolve
+from .schedule import Schedule, Window, parse_windows
 
 MIN_INTERVAL_SECONDS = 30
 DEFAULT_PROFILE = Path.home() / ".duo-tracker" / "profile"
@@ -32,6 +33,13 @@ class Config:
     stall_minutes: int = 10
     healthcheck_url: str = ""
     signin_check_minutes: int = 60
+    zip: str = ""
+    schedule_default: int = 30
+    schedule_windows: tuple = ()
+    schedule_tz: str = "America/New_York"
+
+    def make_schedule(self, log_path: Path | None = None) -> Schedule:
+        return Schedule(self.schedule_default, list(self.schedule_windows), self.schedule_tz, log_path)
 
     def cap_for(self, model: Model) -> float:
         return self.max_total if self.max_total is not None else round(model.price * DEFAULT_TAX_HEADROOM, 2)
@@ -61,6 +69,17 @@ def load(path: str | Path) -> Config:
     ntfy = raw.get("ntfy") or {}
     browser = raw.get("browser") or {}
     health = raw.get("health") or {}
+    sched = raw.get("schedule") or {}
+    windows = parse_windows(sched.get("windows"))
+    sched_default = int(sched.get("default_seconds", interval))
+    tz = str(sched.get("timezone", "America/New_York"))
+    try:
+        Schedule(sched_default, windows, tz)
+    except Exception as e:
+        raise ValueError(str(e) if isinstance(e, ValueError) else f"config: bad schedule.timezone {tz!r}")
+    zip_code = str(raw.get("zip") or "").strip()
+    if zip_code and not (zip_code.isdigit() and len(zip_code) == 5):
+        raise ValueError("config: zip must be a 5-digit US ZIP code")
     return Config(
         models=models,
         carrier=CARRIERS[carrier_key],
@@ -79,6 +98,10 @@ def load(path: str | Path) -> Config:
         stall_minutes=max(3, int(health.get("stall_minutes", 10))),
         healthcheck_url=str(health.get("healthcheck_url") or ""),
         signin_check_minutes=max(15, int(raw.get("signin_check_minutes", 60))),
+        zip=zip_code,
+        schedule_default=sched_default,
+        schedule_windows=tuple(windows),
+        schedule_tz=tz,
     )
 
 

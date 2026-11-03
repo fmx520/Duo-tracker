@@ -33,7 +33,7 @@ class Health:
         self.last_success = clock()
         self.last_problem = ""
         self.stall_notified = False
-        self.checks = self.drops = 0
+        self.checks = self.drops = self.blocks = 0
         self.last_ping = 0.0
         self.last_summary_day = now().date() if daily_hour is not None and now().hour >= daily_hour else None
 
@@ -55,6 +55,7 @@ class Health:
         """A problem you've already been told about (e.g. Apple block back-off): don't double-alert."""
         self.last_problem = reason
         self.stall_notified = True
+        self.blocks += 1
 
     def drop(self) -> None:
         self.drops += 1
@@ -76,9 +77,10 @@ class Health:
             state = "⚠️ currently stalled" if self.stall_notified else "healthy"
             self.notifier.send(
                 "Duo-tracker daily check-in",
-                f"{socket.gethostname()}: {state}. {self.checks} checks, {self.drops} drops since last check-in.",
+                f"{socket.gethostname()}: {state}. {self.checks} checks, {self.drops} drops, "
+                f"{self.blocks} Apple blocks since last check-in.",
                 urgent=False, tags="calendar")
-            self.checks = self.drops = 0
+            self.checks = self.drops = self.blocks = 0
 
     def ping(self, fail: bool = False, force: bool = False) -> None:
         if not self.hc_url:

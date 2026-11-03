@@ -56,13 +56,22 @@ def _ask(prompt: str, default: str = "", check=None, input_fn=input) -> str:
 
 
 CONFIG_TEMPLATE = """# Written by `python -m duo_tracker init`. Edit freely; see config.example.yaml for every option.
+zip: "{zip}"               # enter this in the bot's browser during `./duo setup`
 models:
 {models}
 carrier: {carrier}
 stores: [{stores}]
 max_miles: {max_miles}
 alert_on_courier: true
-interval_seconds: 30
+
+# Faster when drops land (Long Island: ~7:30–9:30am ET, some around midnight).
+# A block inside a fast window drops that window back to default_seconds.
+schedule:
+  timezone: America/New_York
+  default_seconds: 90
+  windows:
+    - {{start: "07:30", end: "09:30", seconds: 30}}
+    - {{start: "23:30", end: "00:30", seconds: 30}}
 
 ntfy:
   server: https://ntfy.sh
@@ -89,13 +98,24 @@ def cmd_init(args, input_fn=input) -> int:
 
     from .catalog import resolve
 
+    from .catalog import ZIP_PRESETS
+
     path = Path(args.config)
     if path.exists() and _ask(f"{path} exists — overwrite? (y/n)", "n", input_fn=input_fn).lower() != "y":
         print("Left it alone.")
         return 0
 
+    def valid_zip(a):
+        if not (a.isdigit() and len(a) == 5):
+            raise ValueError("enter a 5-digit ZIP code")
+    zip_code = _ask("Your ZIP code", "11754", valid_zip, input_fn)
+    preset = ZIP_PRESETS.get(zip_code, {})
+    if preset:
+        print(f"  Using the {zip_code} preset: nearby stores with a drop history, and the models that actually drop.")
+
     print("\nWhich iPhone Duo models do you want? (comma-separated numbers)")
     keys = list(MODELS)
+    default_models = ",".join(str(keys.index(k) + 1) for k in preset.get("models", ["256gb-nightsky"]))
     for i, k in enumerate(keys, 1):
         print(f"  {i}. {MODELS[k].name} — ${MODELS[k].price:,}")
 
@@ -103,7 +123,7 @@ def cmd_init(args, input_fn=input) -> int:
         nums = [int(x) for x in ans.replace(" ", "").split(",") if x]
         if not nums or any(not 1 <= n <= len(keys) for n in nums):
             raise ValueError(f"pick numbers between 1 and {len(keys)}")
-    chosen = [keys[int(x) - 1] for x in _ask("Models", "1", pick, input_fn).replace(" ", "").split(",") if x]
+    chosen = [keys[int(x) - 1] for x in _ask("Models", default_models, pick, input_fn).replace(" ", "").split(",") if x]
     for k in chosen:
         resolve(k)
 
@@ -120,8 +140,10 @@ def cmd_init(args, input_fn=input) -> int:
             raise ValueError("choose alert, bag, review or submit")
     mode = _ask("Mode", "submit", valid_mode, input_fn)
 
-    max_miles = _ask("Ignore stores farther than how many miles?", "20", lambda a: float(a), input_fn)
-    stores = _ask("Only these stores? (comma-separated names, blank = any nearby)", "", input_fn=input_fn)
+    max_miles = _ask("Ignore stores farther than how many miles?", str(preset.get("max_miles", 20)),
+                     lambda a: float(a), input_fn)
+    stores = _ask("Only these stores? (comma-separated names/numbers, blank = any nearby)",
+                  ", ".join(preset.get("stores", [])), input_fn=input_fn)
     topic = _ask("ntfy topic (install the ntfy app and subscribe to this)", f"duo-{secrets.token_hex(5)}",
                  input_fn=input_fn)
     hc = _ask("healthchecks.io ping URL for 'box went offline' alerts (blank to skip)", "", input_fn=input_fn)
@@ -129,7 +151,7 @@ def cmd_init(args, input_fn=input) -> int:
     store_list = ", ".join(f'"{x.strip()}"' for x in stores.split(",") if x.strip())
     path.write_text(CONFIG_TEMPLATE.format(
         models="\n".join(f"  - {k}" for k in chosen), carrier=carrier, stores=store_list,
-        max_miles=max_miles, topic=topic, mode=mode, hc=hc))
+        max_miles=max_miles, topic=topic, mode=mode, hc=hc, zip=zip_code))
     print(f"\n✔ wrote {path}")
 
     if _ask("Send a test notification now? (y/n)", "y", input_fn=input_fn).lower() == "y":
@@ -149,10 +171,11 @@ def cmd_setup(args) -> int:
         ctx = open_context(pw, cfg)
         page = _page(ctx)
         page.goto(BUY_URL)
+        zip_hint = cfg.zip or "your ZIP"
         print(
             "\nA browser window opened. In it:\n"
             "  1. Sign in to your Apple Account (top-right bag icon → Sign in). Approve 2FA.\n"
-            "  2. Pick any iPhone Duo config, click 'Check availability', enter your ZIP,\n"
+            f"  2. Pick any iPhone Duo config, click 'Check availability', enter {zip_hint},\n"
             "     and select your preferred store. Apple remembers it in this profile.\n"
             "  3. Make sure a payment method is saved in your Apple Account (Apple Pay or card).\n"
             "  4. Close the browser window when done.\n"
@@ -204,10 +227,12 @@ def cmd_watch(args) -> int:
     from .availability import hit_keys, matching_stores
     from .browser import Blocked, check_round, open_context, _page, sleep_with_status
     from .checkout import empty_bag, order_lock, rehearsal_ok, signed_in
+    from .checkout import STATE_DIR
     from .config import load
     from .health import Health
 
     cfg = load(args.config)
+    sched = cfg.make_schedule(STATE_DIR / "blocks.csv")
     notifier = Notifier(cfg.ntfy_server, cfg.ntfy_topic)
     if not cfg.ntfy_topic:
         print("warning: no ntfy.topic set — alerts will only print here.")
@@ -224,8 +249,11 @@ def cmd_watch(args) -> int:
         print(f"Auto-buy armed ({why}). Caps: " +
               ", ".join(f"{m.key} ≤ ${cfg.cap_for(m):,.2f}" for m in cfg.models))
 
-    print(f"Watching {', '.join(m.key for m in cfg.models)} every {cfg.interval_seconds}s "
-          f"(checkout mode: {cfg.checkout_mode}). Ctrl-C to stop.")
+    peaks = ", ".join(f"{w.label} every {w.seconds}s" for w in cfg.schedule_windows)
+    print(f"Watching {', '.join(m.key for m in cfg.models)}: every {cfg.schedule_default}s"
+          + (f", faster at peak ({peaks}, {cfg.schedule_tz})" if peaks else "")
+          + f". Checkout mode: {cfg.checkout_mode}. Ctrl-C to stop.")
+    last_label = ""
     backoff = cfg.blocked_backoff_seconds
     warned_no_store = False
     errors_in_a_row = 0
@@ -308,6 +336,7 @@ def cmd_watch(args) -> int:
                     notifier.send("Duo-tracker paused", f"Apple blocked checks ({e}). Retrying in {backoff // 60} min.",
                                   urgent=False, tags="warning")
                     health.already_notified(f"Apple blocked checks ({e})")
+                    sched.on_block(str(e))
                     sleep_with_status(backoff, on_tick=health.tick)
                     backoff = min(backoff * 2, 3600)
                     continue
@@ -316,7 +345,11 @@ def cmd_watch(args) -> int:
                 # keep last-known state for models that errored this round, so they don't re-alert
                 live = {k: v for k, v in live.items() if k.split(":")[-1] not in checked} | now
                 health.tick()
-                sleep_with_status(cfg.interval_seconds, on_tick=health.tick)
+                wait, label = sched.current()
+                if label != last_label:
+                    last_label = label
+                    print(f"[{_ts()}] {label}: checking every {wait}s")
+                sleep_with_status(wait, on_tick=health.tick)
         except KeyboardInterrupt:
             print("\nbye")
         finally:
@@ -426,6 +459,13 @@ def cmd_rehearse(args) -> int:
     return 0
 
 
+def cmd_blocks(_args) -> int:
+    from .checkout import STATE_DIR
+    from .schedule import summarize_blocks
+    print(summarize_blocks(STATE_DIR / "blocks.csv"))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     p = argparse.ArgumentParser(prog="duo_tracker", description="Watch Apple for iPhone Duo pickup stock.")
@@ -437,6 +477,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("notify-test", help="send a test push to your ntfy topic").set_defaults(fn=cmd_notify_test)
     sub.add_parser("check", help="check each model once and print results").set_defaults(fn=cmd_check)
     sub.add_parser("watch", help="keep checking; act on stock per checkout.mode").set_defaults(fn=cmd_watch)
+    sub.add_parser("blocks", help="summarize when Apple blocked checks, to tune the schedule").set_defaults(fn=cmd_blocks)
     r = sub.add_parser("rehearse", help="walk checkout to the review page without ordering (arms submit mode)")
     r.add_argument("--pickup-item-url", help="apple.com product page of any in-stock accessory, to test the pickup steps")
     r.set_defaults(fn=cmd_rehearse)

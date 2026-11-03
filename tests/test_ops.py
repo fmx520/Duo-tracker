@@ -104,7 +104,8 @@ def test_init_wizard_writes_loadable_config(tmp_path, monkeypatch):
     from duo_tracker import cli
     sent = []
     monkeypatch.setattr(cli, "cmd_notify_test", lambda args: sent.append(args.config) or 0)
-    answers = iter(["3,9,2",          # invalid (9) -> re-asked
+    answers = iter(["1234", "90210",  # bad ZIP re-asked; a ZIP with no preset
+                    "3,9,2",          # invalid (9) -> re-asked
                     "3,2",            # 512gb-nightsky, 256gb-starwhite
                     "sprint", "verizon",
                     "yolo", "submit",

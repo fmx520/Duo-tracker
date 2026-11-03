@@ -36,6 +36,17 @@ MODELS: dict[str, Model] = {
     ]
 }
 
+# Stores worth watching from a ZIP, with Apple store numbers, ranked by how
+# often the Duo dropped there Oct 26 – Nov 2 (public drop history). Names and
+# numbers both go in the store filter so either spelling matches.
+ZIP_PRESETS = {
+    "11754": {  # Kings Park, NY
+        "stores": ["Smith Haven", "R139", "Walt Whitman", "R068", "Roosevelt Field", "R060", "Manhasset", "R327"],
+        "models": ["256gb-nightsky", "256gb-starwhite", "512gb-nightsky", "512gb-starwhite"],
+        "max_miles": 30,
+    },
+}
+
 # Values of input[name=carrierModel] on the buy page.
 CARRIERS = {
     "unlocked": "UNLOCKED/US",

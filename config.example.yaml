@@ -1,18 +1,30 @@
 # Copy to config.yaml and edit.  `python -m duo_tracker models` lists the keys.
-models:
+zip: "11754"               # Kings Park, NY: enter this in the bot's browser during setup
+models:                    # 256GB/512GB are what actually drop; 1TB/2TB almost never do
   - 256gb-nightsky
   - 256gb-starwhite
+  - 512gb-nightsky
+  - 512gb-starwhite
 
 carrier: unlocked          # unlocked | att | tmobile | verizon
 
 # Optional: only alert for these stores (matches store name, city, or number like R095).
 # Leave empty to alert for any store Apple returns near your saved location.
-stores: []
-max_miles: 25              # ignore stores farther than this (remove the line for no limit)
+# Long Island stores with a Duo drop history (names and Apple store numbers both match).
+stores: ["Smith Haven", "R139", "Walt Whitman", "R068", "Roosevelt Field", "R060", "Manhasset", "R327"]
+max_miles: 30              # ignore stores farther than this (remove the line for no limit)
 alert_on_courier: true     # also alert when same-day courier delivery opens up
 
-# iPhone Duo drops typically last ~2 minutes, so keep this low.
-interval_seconds: 30       # seconds between rounds; minimum 30
+# When to check. Long Island drops land ~7:30–9:30am ET (some around midnight)
+# and last ~1 minute, so check faster then and slower otherwise. If Apple
+# blocks a check inside a fast window, that window falls back to
+# default_seconds until it ends. `./duo blocks` shows when blocks happen.
+schedule:
+  timezone: America/New_York
+  default_seconds: 90      # minimum 30
+  windows:
+    - {start: "07:30", end: "09:30", seconds: 30}
+    - {start: "23:30", end: "00:30", seconds: 30}   # wraps past midnight
 blocked_backoff_seconds: 600
 
 ntfy:

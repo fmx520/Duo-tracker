@@ -26,6 +26,7 @@ case "$cmd" in
 ./duo check       check stock once
 ./duo rehearse    practice checkout (never orders); arms auto-buy for 7 days
 ./duo watch       run in this terminal
+./duo blocks      when Apple blocked checks (to tune the schedule)
 Linux service:    ./duo start | stop | status | logs | vnc
 TXT
     exit 0 ;;

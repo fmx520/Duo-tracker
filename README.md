@@ -13,11 +13,11 @@ anything looks off.
   profile that you sign in to once. Every round it loads the Duo buy page,
   selects your model, and reads the availability answer **the page itself
   fetched** from Apple. It never calls Apple's APIs directly.
-- It checks at a fixed, polite interval (30s default and minimum). Each round
-  loads the page **once** and switches between your models on it, and each
-  switch makes the page ask Apple about that model. Drops tend to last only
-  about 2 minutes (per [duo-tracker-six](https://duo-tracker-six.vercel.app/)),
-  so speed matters.
+- It checks **faster when drops actually happen and slower otherwise.** The
+  default is every 30s from 7:30–9:30am ET and 11:30pm–12:30am ET, and every
+  90s the rest of the day (30s is the floor). Each round loads the page
+  **once** and switches between your models on it, and each switch makes the
+  page ask Apple about that model.
 - It alerts only on **new** drops: a (store, model) pair, or same-day courier
   delivery, that wasn't in stock last round. A model sitting in stock doesn't
   spam you, and a re-drop alerts again.
@@ -158,6 +158,30 @@ billing address, and that the contact details for pickup are filled in.
 phone, bought from your own signed-in browser without disguising it, is the
 lowest-risk version of this, but not risk-free.
 
+## Tuned for 11754 (Kings Park, NY)
+
+The defaults (`./duo init` with ZIP 11754, and `config.example.yaml`) come
+from the public drop history of the NYC-area tracker for Oct 26 – Nov 2:
+
+| Store (straight-line distance) | Drops | Median length |
+|---|---|---|
+| Smith Haven, Lake Grove (6.7 mi) | not tracked there | – |
+| Walt Whitman, Huntington Station (9.2 mi) | 7 | 73s |
+| Roosevelt Field, Garden City (21.3 mi) | 15 | 65s |
+| Manhasset (22.9 mi) | 22 | 30s |
+
+- Long Island drops last **about a minute**, versus about 25s in the city.
+  Nearly all of them landed **7:30–9:30am ET**.
+- Almost all drops were **256GB and 512GB**, so those four models are the default.
+- Norwalk and Greenwich look close on a map but are across the Sound, so the
+  store list is filtered by name (and Apple store number), not just by miles.
+
+**The schedule adapts.** If Apple blocks a check during a fast window, the
+rest of that window drops back to the slow rate. Every block is logged.
+`./duo blocks` shows how often blocks happened at each rate, and the daily
+check-in includes a block count. After a week, tune `schedule:` to what your
+connection actually tolerates.
+
 ## Config
 
 See [`config.example.yaml`](config.example.yaml). The settings most people change:
@@ -166,7 +190,9 @@ See [`config.example.yaml`](config.example.yaml). The settings most people chang
 |-----|---------|
 | `models` | keys from `models`, e.g. `256gb-nightsky`, or part numbers |
 | `carrier` | `unlocked` / `att` / `tmobile` / `verizon` |
+| `zip` | your ZIP; `setup` reminds you to enter it in the bot's browser |
 | `stores` | optional; only alert for stores whose name/city/number matches |
+| `schedule` | `default_seconds`, plus `windows` of `{start, end, seconds}` in `timezone` (min 30s) |
 | `max_miles` | optional; ignore stores farther than this |
 | `alert_on_courier` | also alert when same-day courier delivery is available |
 | `checkout.mode` | `alert` (push only), `bag` (default), `review` (fill checkout, you click Place Order), or `submit` (full auto) |

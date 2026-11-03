@@ -62,43 +62,47 @@ def cmd_setup(args) -> int:
     return 0
 
 
-def _report(model, av) -> None:
-    hits = av.in_stock_stores
+def _report(model, av, stores) -> None:
     if not av.has_pickup_data:
         print(f"[{_ts()}] {model.name}: no store data — run `setup` and pick a store")
     else:
-        print(f"[{_ts()}] {model.name}: {len(hits)}/{len(av.stores)} stores have it"
-              + (f" ({', '.join(s.store_name for s in hits)})" if hits else ""))
-    if av.delivery_quote:
-        print(f"           delivery: {av.delivery_quote}")
+        print(f"[{_ts()}] {model.name}: {len(stores)}/{len(av.stores)} stores have it"
+              + (f" ({', '.join(s.store_name for s in stores)})" if stores else ""))
+    extra = [q for q in (av.delivery_quote, av.courier_quote if av.courier_available else "") if q]
+    if extra:
+        print(f"           {' | '.join(extra)}")
 
 
 def cmd_check(args) -> int:
     from playwright.sync_api import sync_playwright
 
-    from .browser import Blocked, check_model, open_context, _page
+    from .availability import matching_stores
+    from .browser import Blocked, check_round, open_context, _page
     from .config import load
 
     cfg = load(args.config)
     with sync_playwright() as pw:
         ctx = open_context(pw, cfg)
         page = _page(ctx)
-        for m in cfg.models:
-            try:
-                _report(m, check_model(page, m, cfg.carrier))
-            except Blocked as e:
-                print(f"[{_ts()}] Apple blocked the availability request ({e}). Try again later.")
-                return 2
-            except Exception as e:
-                print(f"[{_ts()}] {m.name}: error: {e}")
-        ctx.close()
+        try:
+            for m, res in check_round(page, cfg.models, cfg.carrier):
+                if isinstance(res, Exception):
+                    print(f"[{_ts()}] {m.name}: error: {res}")
+                else:
+                    _report(m, res, matching_stores(res, cfg.store_filter, cfg.max_miles))
+        except Blocked as e:
+            print(f"[{_ts()}] Apple blocked the availability request ({e}). Try again later.")
+            return 2
+        finally:
+            ctx.close()
     return 0
 
 
 def cmd_watch(args) -> int:
     from playwright.sync_api import sync_playwright
 
-    from .browser import Blocked, check_model, go_to_bag, matching_stores, open_context, _page, sleep_with_status
+    from .availability import hit_keys, matching_stores
+    from .browser import Blocked, check_round, go_to_bag, open_context, _page, sleep_with_status
     from .config import load
 
     cfg = load(args.config)
@@ -111,53 +115,61 @@ def cmd_watch(args) -> int:
     backoff = cfg.blocked_backoff_seconds
     warned_no_store = False
     errors_in_a_row = 0
+    live: dict[str, str] = {}  # what was in stock last round, so we alert on new drops only
 
     with sync_playwright() as pw:
         ctx = open_context(pw, cfg)
         page = _page(ctx)
         try:
             while True:
-                for m in cfg.models:
-                    try:
-                        av = check_model(page, m, cfg.carrier)
-                    except Blocked as e:
-                        print(f"[{_ts()}] Apple blocked the request ({e}). Backing off {backoff // 60} min.")
-                        notifier.send("Duo-tracker paused", f"Apple blocked checks ({e}). Retrying in {backoff // 60} min.",
-                                      urgent=False, tags="warning")
-                        sleep_with_status(backoff)
-                        backoff = min(backoff * 2, 3600)
-                        break
-                    except Exception as e:
-                        errors_in_a_row += 1
-                        print(f"[{_ts()}] {m.name}: error: {e}")
-                        if errors_in_a_row == 5:
-                            notifier.send("Duo-tracker needs attention", f"5 errors in a row; last: {e}",
+                now: dict[str, str] = {}
+                checked: set[str] = set()
+                try:
+                    for m, av in check_round(page, cfg.models, cfg.carrier):
+                        if isinstance(av, Exception):
+                            errors_in_a_row += 1
+                            print(f"[{_ts()}] {m.name}: error: {av}")
+                            if errors_in_a_row == 5:
+                                notifier.send("Duo-tracker needs attention", f"5 errors in a row; last: {av}",
+                                              urgent=False, tags="warning")
+                            continue
+                        errors_in_a_row = 0
+                        checked.add(m.part)
+                        stores = matching_stores(av, cfg.store_filter, cfg.max_miles)
+                        _report(m, av, stores)
+                        if not av.has_pickup_data and not warned_no_store:
+                            warned_no_store = True
+                            notifier.send("Duo-tracker: no store set",
+                                          "Run `python -m duo_tracker setup` and choose a pickup store.",
                                           urgent=False, tags="warning")
-                        continue
 
-                    errors_in_a_row = 0
-                    backoff = cfg.blocked_backoff_seconds
-                    _report(m, av)
-                    if not av.has_pickup_data and not warned_no_store:
-                        warned_no_store = True
-                        notifier.send("Duo-tracker: no store set",
-                                      "Run `python -m duo_tracker setup` and choose a pickup store.",
-                                      urgent=False, tags="warning")
+                        keys = hit_keys(m.part, av, stores, cfg.alert_on_courier)
+                        now.update(keys)
+                        fresh = [desc for k, desc in keys.items() if k not in live]
+                        if not fresh:
+                            continue
 
-                    stores = matching_stores(av, cfg.store_filter)
-                    if not stores:
-                        continue
+                        notifier.send(f"🚨 {m.name} IN STOCK", f"{'; '.join(fresh[:4])}. ${m.price}", click=BUY_URL)
+                        if cfg.checkout_mode != "alert":
+                            status = go_to_bag(page, m, cfg.carrier, cfg.checkout_mode)
+                            notifier.send("Finish your iPhone Duo order NOW", status,
+                                          click="https://www.apple.com/shop/bag")
+                            print("\nStopped watching so you can finish checkout. "
+                                  "Browser stays open — press Ctrl-C when done.")
+                            while True:
+                                time.sleep(60)
+                except Blocked as e:
+                    print(f"[{_ts()}] Apple blocked the request ({e}). Backing off {backoff // 60} min.")
+                    notifier.send("Duo-tracker paused", f"Apple blocked checks ({e}). Retrying in {backoff // 60} min.",
+                                  urgent=False, tags="warning")
+                    sleep_with_status(backoff)
+                    backoff = min(backoff * 2, 3600)
+                    continue
 
-                    where = "; ".join(f"{s.store_name} ({s.quote or 'available'})" for s in stores[:4])
-                    notifier.send(f"🚨 {m.name} IN STOCK", f"Pickup: {where}. ${m.price}", click=BUY_URL)
-                    if cfg.checkout_mode != "alert":
-                        status = go_to_bag(page, m, cfg.carrier, cfg.checkout_mode)
-                        notifier.send("Finish your iPhone Duo order NOW", status, click="https://www.apple.com/shop/bag")
-                    print("\nStopped watching so you can finish checkout. Browser stays open — press Ctrl-C when done.")
-                    while True:
-                        time.sleep(60)
-                else:
-                    sleep_with_status(cfg.interval_seconds)
+                backoff = cfg.blocked_backoff_seconds
+                # keep last-known state for models that errored this round, so they don't re-alert
+                live = {k: v for k, v in live.items() if k.split(":")[-1] not in checked} | now
+                sleep_with_status(cfg.interval_seconds)
         except KeyboardInterrupt:
             print("\nbye")
         finally:

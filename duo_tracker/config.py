@@ -24,12 +24,14 @@ class Config:
     profile_dir: Path
     browser_channel: str
     blocked_backoff_seconds: int
+    max_miles: float | None
+    alert_on_courier: bool
 
 
 def load(path: str | Path) -> Config:
     raw = yaml.safe_load(Path(path).read_text()) or {}
 
-    models = [resolve(k) for k in raw.get("models") or []]
+    models = list({m.part: m for m in (resolve(k) for k in raw.get("models") or [])}.values())
     if not models:
         raise ValueError("config: list at least one model under `models:` (run `python -m duo_tracker models`)")
 
@@ -37,7 +39,7 @@ def load(path: str | Path) -> Config:
     if carrier_key not in CARRIERS:
         raise ValueError(f"config: carrier must be one of {', '.join(CARRIERS)}")
 
-    interval = int(raw.get("interval_seconds", 60))
+    interval = int(raw.get("interval_seconds", 30))
     if interval < MIN_INTERVAL_SECONDS:
         raise ValueError(f"config: interval_seconds must be >= {MIN_INTERVAL_SECONDS} (be polite to apple.com)")
 
@@ -58,4 +60,6 @@ def load(path: str | Path) -> Config:
         profile_dir=Path(browser.get("profile_dir") or DEFAULT_PROFILE).expanduser(),
         browser_channel=str(browser.get("channel", "chrome")),
         blocked_backoff_seconds=max(300, int(raw.get("blocked_backoff_seconds", 600))),
+        max_miles=float(raw["max_miles"]) if raw.get("max_miles") is not None else None,
+        alert_on_courier=bool(raw.get("alert_on_courier", True)),
     )

@@ -16,7 +16,7 @@ from urllib.parse import unquote
 
 from playwright.sync_api import BrowserContext, Page, Playwright, TimeoutError as PWTimeout
 
-from .availability import Availability, matching_stores, parse  # noqa: F401 (re-export)
+from .availability import Availability, parse
 from .catalog import BAG_URL, BUY_URL, Model
 from .config import Config
 
@@ -61,10 +61,20 @@ def select_config(page: Page, model: Model, carrier: str) -> None:
         page.wait_for_timeout(400)
 
 
-def check_model(page: Page, model: Model, carrier: str) -> Availability:
-    """Load the buy page, select ``model``, and parse the page's own availability response."""
+def load_buy_page(page: Page) -> None:
     page.goto(BUY_URL, wait_until="domcontentloaded", timeout=60_000)
-    page.locator(f'[data-autom="dimensionColor{model.color}"]').wait_for(state="attached", timeout=30_000)
+    page.locator('[data-autom^="dimensionColor"]').first.wait_for(state="attached", timeout=30_000)
+
+
+def check_model(page: Page, model: Model, carrier: str, *, reload: bool = True) -> Availability:
+    """Select ``model`` and parse the availability response the page fetches for it.
+
+    With ``reload=False`` it reuses the already-loaded buy page: changing the
+    color/capacity makes the page ask Apple about the new part by itself, so a
+    round over several models costs one page load, not one per model.
+    """
+    if reload:
+        load_buy_page(page)
 
     def is_ours(r) -> bool:
         u = unquote(r.url)
@@ -86,6 +96,25 @@ def check_model(page: Page, model: Model, carrier: str) -> Availability:
     except Exception:
         raise Blocked("availability response was not JSON (likely a challenge page)")
     return parse(payload, model.part)
+
+
+def check_round(page: Page, models: list[Model], carrier: str):
+    """Yield (model, Availability | Exception) for each model, loading the page once."""
+    for i, m in enumerate(models):
+        try:
+            yield m, check_model(page, m, carrier, reload=(i == 0))
+        except Blocked:
+            raise
+        except Exception as first:
+            if i == 0:
+                yield m, first
+                continue
+            try:  # same-page switch didn't fire a request; try once more with a fresh load
+                yield m, check_model(page, m, carrier, reload=True)
+            except Blocked:
+                raise
+            except Exception as e:
+                yield m, e
 
 
 def go_to_bag(page: Page, model: Model, carrier: str, mode: str) -> str:

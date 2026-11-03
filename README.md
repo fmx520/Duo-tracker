@@ -11,7 +11,14 @@ That takes about 20 seconds with Apple Pay.
   profile that you sign in to once. Every round it loads the Duo buy page,
   selects your model, and reads the availability answer **the page itself
   fetched** from Apple. It never calls Apple's APIs directly.
-- It checks at a fixed, polite interval (60s default, 30s minimum).
+- It checks at a fixed, polite interval (30s default and minimum). Each round
+  loads the page **once** and switches between your models on it, and each
+  switch makes the page ask Apple about that model. Drops tend to last only
+  about 2 minutes (per [duo-tracker-six](https://duo-tracker-six.vercel.app/)),
+  so speed matters.
+- It alerts only on **new** drops: a (store, model) pair, or same-day courier
+  delivery, that wasn't in stock last round. A model sitting in stock doesn't
+  spam you, and a re-drop alerts again.
 - **If Apple refuses** (HTTP 541/403/429 or a challenge page), it stops,
   pushes you a "paused" note, and waits 10 minutes, doubling up to an hour.
   It has no stealth tricks, no fingerprint spoofing, and no CAPTCHA solving.
@@ -49,8 +56,9 @@ python -m duo_tracker models       # list model keys / part numbers / prices
 
 When stock hits, you'll get **🚨 iPhone Duo … IN STOCK** followed by **Finish
 your iPhone Duo order NOW**. Go to the Mac, or tap the alert to open the bag on
-your phone. Choose **pickup** at the listed store and pay. The bot stops
-watching after a hit so it doesn't fight you for the page.
+your phone. Choose **pickup** at the listed store and pay. In `bag`/`checkout`
+mode the bot stops watching after a hit so it doesn't fight you for the page.
+In `alert` mode it keeps watching and pings you for each new drop.
 
 ## Config
 
@@ -61,7 +69,22 @@ See [`config.example.yaml`](config.example.yaml). The settings most people chang
 | `models` | keys from `models`, e.g. `256gb-nightsky`, or part numbers |
 | `carrier` | `unlocked` / `att` / `tmobile` / `verizon` |
 | `stores` | optional; only alert for stores whose name/city/number matches |
+| `max_miles` | optional; ignore stores farther than this |
+| `alert_on_courier` | also alert when same-day courier delivery is available |
 | `checkout.mode` | `alert` (push only), `bag` (default), or `checkout` |
+
+## Prior art
+
+- [kelindi/apple-stock](https://github.com/kelindi/apple-stock) (MIT). The
+  response-field names (`stickyMessageIDL`/`idl` for courier,
+  `storePickupQuote` fallback, distance units) and the "alert only on new keys"
+  idea come from its parser. **Deliberately not copied:** its user-agent
+  spoofing, removal of Chrome's automation flags, and retry-until-the-challenge-
+  clears loop. Those exist to get around Apple's bot shield, and this project
+  won't do that.
+- [duo-tracker-six.vercel.app](https://duo-tracker-six.vercel.app/): a hosted
+  NYC-area pickup radar with push alerts. If you're in NYC it's worth
+  subscribing to alongside this.
 
 ## Development
 

@@ -8,8 +8,11 @@ carrier: unlocked          # unlocked | att | tmobile | verizon
 # Optional: only alert for these stores (matches store name, city, or number like R095).
 # Leave empty to alert for any store Apple returns near your saved location.
 stores: []
+max_miles: 25              # ignore stores farther than this (remove the line for no limit)
+alert_on_courier: true     # also alert when same-day courier delivery opens up
 
-interval_seconds: 60       # seconds between rounds; minimum 30
+# iPhone Duo drops typically last ~2 minutes, so keep this low.
+interval_seconds: 30       # seconds between rounds; minimum 30
 blocked_backoff_seconds: 600
 
 ntfy:

@@ -71,7 +71,7 @@ def test_config_ok(tmp_path):
     assert [m.part for m in cfg.models] == ["MK1F4LL/A", "MK1J4LL/A"]
     assert cfg.carrier == "VERIZON_IPHONEDUO"
     assert cfg.store_filter == ["fifth avenue"]
-    assert cfg.interval_seconds == 60 and cfg.checkout_mode == "checkout"
+    assert cfg.interval_seconds == 30 and cfg.checkout_mode == "checkout"
 
 
 @pytest.mark.parametrize("body,msg", [
@@ -89,3 +89,45 @@ def test_example_config_loads():
     from pathlib import Path
     cfg = load(Path(__file__).parent.parent / "config.example.yaml")
     assert cfg.checkout_mode == "bag"
+
+
+def test_courier_and_ship_quotes():
+    from duo_tracker.availability import parse
+    p = {"body": {"content": {"deliveryMessage": {PART: {"regular": {
+        "idl": True, "stickyMessageIDL": "Courier delivery today, 4–6 pm",
+        "stickyMessageSTH": "Delivers Jan 25 – Feb 1"}}}}}}
+    av = parse(p, PART)
+    assert av.courier_available and av.courier_quote.startswith("Courier")
+    assert av.delivery_quote.startswith("Delivers Jan 25")
+    p["body"]["content"]["deliveryMessage"][PART]["regular"]["stickyMessageIDL"] = "Courier delivery unavailable"
+    assert not parse(p, PART).courier_available
+
+
+def test_distance_and_pickup_quote_fallback():
+    p = {"body": {"content": {"pickupMessage": {"stores": [
+        {"storeName": "Near", "storeNumber": "R1", "storeDistanceWithUnit": "2.4 mi",
+         "partsAvailability": {PART: {"pickupDisplay": "available",
+                                      "messageTypes": {"regular": {"storePickupQuote": "Today at Near"}}}}},
+        {"storeName": "Far", "storeNumber": "R2", "storeDistanceWithUnit": "48 km",
+         "partsAvailability": {PART: {"pickupDisplay": "available"}}},
+    ]}}}}
+    av = parse(p, PART)
+    assert av.stores[0].miles == 2.4 and av.stores[0].quote == "Today at Near"
+    assert round(av.stores[1].miles, 1) == 29.8
+    assert [s.store_name for s in matching_stores(av, [], max_miles=10)] == ["Near"]
+
+
+def test_hit_keys_only_new_drops_alert():
+    from duo_tracker.availability import hit_keys
+    av = parse(payload([("Fifth Avenue", "New York", "available"), ("SoHo", "New York", "available")]), PART)
+    k1 = hit_keys(PART, av, av.in_stock_stores, courier=True)
+    assert set(k1) == {f"pickup:R000:{PART}", f"pickup:R001:{PART}"}
+    # next round SoHo sells out, Fifth stays: nothing fresh
+    av2 = parse(payload([("Fifth Avenue", "New York", "available"), ("SoHo", "New York", "unavailable")]), PART)
+    k2 = hit_keys(PART, av2, av2.in_stock_stores, courier=True)
+    assert [k for k in k2 if k not in k1] == []
+
+
+def test_duplicate_models_collapse(tmp_path):
+    cfg = load(write(tmp_path, "models: [256gb-nightsky, MK1F4LL/A]"))
+    assert len(cfg.models) == 1 and cfg.interval_seconds == 30 and cfg.max_miles is None

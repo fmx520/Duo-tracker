@@ -118,3 +118,14 @@ def test_block_is_reported_not_retried(page_factory, status):
     with pytest.raises(Blocked, match=str(status)):
         check_model(page, resolve("256gb-nightsky"), "UNLOCKED/US")
     assert sum("fulfillment-messages" in u for u in page.seen) == 1
+
+
+def test_round_loads_page_once_for_many_models(page_factory):
+    from duo_tracker.browser import check_round
+    page = page_factory()
+    models = [resolve(k) for k in ("256gb-nightsky", "256gb-starwhite", "1tb-starwhite")]
+    results = list(check_round(page, models, "UNLOCKED/US"))
+    assert [m.part for m, _ in results] == ["MK1F4LL/A", "MK1E4LL/A", "MK1J4LL/A"]
+    assert all(not isinstance(av, Exception) and av.in_stock_stores for _, av in results)
+    page_loads = [u for u in page.seen if "fulfillment" not in u]
+    assert len(page_loads) == 1, page_loads

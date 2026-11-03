@@ -33,7 +33,6 @@ import random
 import secrets
 import sys
 import time
-from urllib.parse import urlencode
 
 from playwright.sync_api import BrowserContext, Page, Playwright, TimeoutError as PWTimeout
 
@@ -101,13 +100,16 @@ def open_context(pw: Playwright, cfg: Config) -> BrowserContext:
 
 
 def _fulfillment_path(part: str, zip_code: str = "") -> str:
-    params = {"fae": "true", "pl": "true", "mts.0": "regular", "parts.0": part}
+    # Built by hand, not urlencode: part numbers contain "/" and Apple's own
+    # page sends them unencoded, so our requests should look the same.
+    params = [("fae", "true"), ("pl", "true"), ("mts.0", "regular"), ("parts.0", part)]
     if zip_code:
-        params["location"] = zip_code
+        params.append(("location", zip_code))
     # Lanbig: a random cache-busting id on every request, so Apple's anti-bot
     # system never sees two identical URLs.
-    bust = f"_={int(time.time() * 1000)}-{secrets.token_hex(4)}"
-    return f"/shop/fulfillment-messages?{urlencode(params)}&{bust}"
+    params.append(("_", f"{int(time.time() * 1000)}-{secrets.token_hex(4)}"))
+    qs = "&".join(f"{k}={v}" for k, v in params)
+    return f"/shop/fulfillment-messages?{qs}"
 
 
 def active_fetch(page: Page, part: str, zip_code: str = "") -> dict:

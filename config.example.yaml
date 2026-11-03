@@ -1,0 +1,28 @@
+# Copy to config.yaml and edit.  `python -m duo_tracker models` lists the keys.
+models:
+  - 256gb-nightsky
+  - 256gb-starwhite
+
+carrier: unlocked          # unlocked | att | tmobile | verizon
+
+# Optional: only alert for these stores (matches store name, city, or number like R095).
+# Leave empty to alert for any store Apple returns near your saved location.
+stores: []
+
+interval_seconds: 60       # seconds between rounds; minimum 30
+blocked_backoff_seconds: 600
+
+ntfy:
+  server: https://ntfy.sh
+  topic: ""                # pick something long & unguessable, e.g. duo-7f3k9q2xw
+
+checkout:
+  # alert    – push notification only
+  # bag      – also add the in-stock model to your bag and open it (default)
+  # checkout – also click "Check Out"; you still choose the store and pay
+  # The bot never places the order.
+  mode: bag
+
+browser:
+  channel: chrome          # uses your installed Google Chrome; "chromium" for Playwright's bundled one
+  profile_dir: ~/.duo-tracker/profile

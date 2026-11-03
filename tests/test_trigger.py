@@ -95,8 +95,17 @@ def test_garbage_and_wrong_version_rejected(cfg, nonces):
 def test_unknown_part_and_unfiltered_store_rejected(cfg, nonces):
     with pytest.raises(trig.TriggerRejected, match="not a watched model"):
         check(trig.make("MK1F4LL/A", WW, SECRET), cfg, nonces)    # 256GB: real part, not watched
-    with pytest.raises(trig.TriggerRejected, match="outside the configured store filter"):
+    with pytest.raises(trig.TriggerRejected, match="outside the configured store filter") as e:
         check(trig.make(PART, "R139", SECRET), cfg, nonces)        # Smith Haven: not in this filter
+    assert e.value.security is False                               # our own detector, just broader
+
+
+def test_tampered_unwatched_trigger_is_still_a_security_event(cfg, nonces):
+    p = trig.make(PART, "R139", SECRET)
+    p["sig"] = "0" * 64
+    with pytest.raises(trig.TriggerRejected, match="bad signature") as e:
+        check(p, cfg, nonces)
+    assert e.value.security is True
 
 
 # ── 6. config validation ──────────────────────────────────────────────────────
@@ -179,6 +188,12 @@ def test_rejected_triggers_buy_nothing_and_alert(tmp_path, monkeypatch):
     assert h.run("hello", bad, expired, unfiltered) == 0
     assert h.acted == [] and h.checks == 0
     assert h.sent.count("⚠️ Trigger rejected") == 1    # alerted, but flood-guarded
+
+
+def test_signed_trigger_for_unwatched_store_is_ignored_quietly(tmp_path, monkeypatch):
+    h = Harness(tmp_path, monkeypatch)
+    h.run(trig.make(PART, "R139", SECRET))
+    assert h.acted == [] and h.checks == 0 and "⚠️ Trigger rejected" not in h.sent
 
 
 # ── 3. valid trigger, Apple disagrees → no buy, alert ─────────────────────────

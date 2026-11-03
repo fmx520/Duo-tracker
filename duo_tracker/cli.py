@@ -629,6 +629,9 @@ def _handle_trigger(raw, *, page, cfg, act_cfg, notifier, health, nonces, drop_l
         t = trig.validate(raw, secret=cfg.trigger_secret, parts=set(by_part), store_allowed=cfg.store_allowed,
                           max_age_seconds=cfg.trigger_max_age_seconds, nonces=nonces)
     except trig.TriggerRejected as e:
+        if not e.security:
+            say(f"ignored trigger: {e}")
+            return None
         health.trigger(False)
         say(f"REJECTED trigger: {e}. Nothing bought.", logging.WARNING)
         if time.monotonic() - state["last_reject_alert"] >= REJECT_ALERT_EVERY_S or not state["last_reject_alert"]:

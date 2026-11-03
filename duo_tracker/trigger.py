@@ -36,7 +36,16 @@ NONCE_KEEP_SECONDS = 24 * 3600
 
 
 class TriggerRejected(Exception):
-    """A trigger failed validation. Treat as a security event."""
+    """A trigger failed validation.
+
+    ``security`` is True unless the trigger was correctly signed and fresh but
+    simply not wanted (a model or store you don't watch) -- that is your own
+    detector being broader than your filter, not an attack.
+    """
+
+    def __init__(self, reason: str, security: bool = True):
+        super().__init__(reason)
+        self.security = security
 
 
 @dataclass(frozen=True)
@@ -122,11 +131,6 @@ def validate(raw: str, *, secret: str, parts: set[str], store_allowed: Callable[
     part, store, nonce = p.get("part"), p.get("store_number"), p.get("nonce")
     if not (isinstance(part, str) and isinstance(store, str) and isinstance(nonce, str) and nonce):
         raise TriggerRejected("missing part, store_number or nonce")
-    if part not in parts:
-        raise TriggerRejected(f"part {part} is not a watched model")
-    if not store_allowed(store):
-        raise TriggerRejected(f"store {store} is outside the configured store filter")
-
     try:
         seen = datetime.fromisoformat(str(p.get("seen_at")))
     except ValueError:
@@ -142,6 +146,12 @@ def validate(raw: str, *, secret: str, parts: set[str], store_allowed: Callable[
     if nonce in nonces:
         raise TriggerRejected("replayed nonce")
     nonces.add(nonce)
+    # Signed, fresh and new, so it came from our detector: an unwatched model or
+    # store is a filter mismatch, not a security event.
+    if part not in parts:
+        raise TriggerRejected(f"part {part} is not a watched model", security=False)
+    if not store_allowed(store):
+        raise TriggerRejected(f"store {store} is outside the configured store filter", security=False)
     return Trigger(part=part, store_number=store, seen_at=seen, nonce=nonce)
 
 

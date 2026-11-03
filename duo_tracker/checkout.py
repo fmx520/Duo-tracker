@@ -432,16 +432,44 @@ def _choose_window(page: Page) -> None:
 
 # ── sign-in check ─────────────────────────────────────────────────────────────
 ACCOUNT_URL = "https://www.apple.com/shop/account/home"
+ACCOUNT_HINTS = ("/shop/account", "/shop/orders")
+# A real sign-in/2FA prompt, as opposed to Apple's redirect *through* the
+# sign-in host: password field, or the idmsa form elements it renders.
+SIGNIN_FIELDS = ('input[type="password"], input[name="accountName"], '
+                 'input[id*="account_name" i], #remember-me, input[type="tel"]')
 
 
 def signed_in(page: Page) -> bool:
-    """Load your Apple Store account page; False if Apple bounces it to sign-in."""
+    """Load your Apple Store account page; False only if Apple leaves you at a
+    real sign-in prompt.
+
+    Signed-in sessions also get redirected *through* secureN.store.apple.com
+    /shop/signIn/account?ssi=… -- it is how Apple refreshes the session and it
+    forwards on to the account page a moment later. So a sign-in URL alone
+    proves nothing: judge by where the redirect chain SETTLES and whether a
+    sign-in form is actually on the page.
+    """
     page.goto(ACCOUNT_URL, wait_until="domcontentloaded", timeout=60_000)
-    deadline = time.monotonic() + 6
-    while time.monotonic() < deadline:  # sign-in redirects / iframes can arrive a beat late
-        url = page.url.lower()
-        if any(h in url for h in SIGNIN_HINTS) or _visible(page, 'input[type="password"]') \
-                or any("idmsa.apple.com" in (f.url or "") for f in page.frames):
+    deadline = time.monotonic() + 25
+    while time.monotonic() < deadline:
+        try:
+            url = page.url.lower()
+        except Exception:
+            page.wait_for_timeout(500)
+            continue
+        if any(h in url for h in SIGNIN_HINTS):
+            # Sign-in host/path: only signed out if it STAYS here with a form.
+            if _visible(page, SIGNIN_FIELDS) or _visible(page, 'input[type="password"]'):
+                return False
+            page.wait_for_timeout(500)
+            continue
+        if any(h in url for h in ACCOUNT_HINTS):
+            return True
+        # Some other apple.com page: if a sign-in form is on it, signed out;
+        # otherwise give the redirect another beat to finish.
+        if _visible(page, SIGNIN_FIELDS):
             return False
         page.wait_for_timeout(500)
-    return True
+    # Timed out mid-redirect: treat "no sign-in form anywhere" as signed in,
+    # matching the watcher's don't-cry-wolf rule.
+    return not _visible(page, SIGNIN_FIELDS)

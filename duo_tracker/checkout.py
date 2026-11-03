@@ -7,6 +7,7 @@ guessing:
   * Apple asks you to sign in again / 2FA           -> stop (never automated)
   * Apple asks for a card security code or a card   -> stop (no card data stored)
   * Any page it doesn't recognise / a challenge     -> stop
+  * Bag doesn't hold exactly ONE of the target phone -> stop (never buy 2+)
   * Review page doesn't show the expected model     -> stop
   * Review page doesn't show the expected store     -> stop
   * Order total missing or above the cap            -> stop (also catches qty > 1)
@@ -43,6 +44,11 @@ CONTINUE_BTN = ['[data-autom*="continue-button" i]',
 PLACE_ORDER_BTN = ['[data-autom*="place-order" i]', re.compile(r"Place\s+(Your\s+)?Order", re.I)]
 REMOVE_BTN = ['[data-autom*="remove" i]', re.compile(r"^\s*Remove\b", re.I)]
 WINDOW_SELECT = 'select[data-autom*="window" i], select[name*="window" i], select[id*="window" i]'
+
+# Bag line items. Apple renders each product in the bag inside a container whose
+# data-autom starts with "bag-item"; the quantity lives in a <select> or a
+# "Quantity: N" label inside it. Used to prove the bag holds exactly one phone.
+BAG_ITEM = '[data-autom^="bag-item"]'
 
 SIGNIN_HINTS = ("idmsa.apple.com", "/signin", "/sign-in")
 CVV_FIELD = ('input[autocomplete="cc-csc"], input[name*="cvv" i], input[id*="cvv" i], '
@@ -285,6 +291,65 @@ def empty_bag(page: Page) -> int:
     return removed
 
 
+def _bag_item_quantities(page: Page) -> list[int]:
+    """Quantity of each line item currently in the bag.
+
+    Reads Apple's bag-item containers. Quantity is taken from the item's
+    <select> if present, else a "Quantity: N" / "Qty N" label, else 1 (an item
+    with no quantity control is a single unit). Returns one entry per line
+    item; an empty list means we couldn't find the item containers at all.
+    """
+    try:
+        return page.evaluate("""() => {
+            // Keep only outermost bag-item containers; Apple's remove button is
+            // data-autom="bag-item-remove-button" and sits INSIDE the row, so
+            // without this one phone would count as two.
+            const all = [...document.querySelectorAll('[data-autom^="bag-item"], [data-autom^="bagItem"], [data-autom^="rs-bag-item"]')];
+            const rows = all.filter(e =>
+                !/remove/i.test(e.getAttribute('data-autom') || '') &&
+                !all.some(other => other !== e && other.contains(e)));
+            return rows.map(it => {
+                const sel = it.querySelector('select');
+                if (sel && sel.value && /^\\d+$/.test(sel.value)) return parseInt(sel.value, 10);
+                const m = (it.innerText || '').match(/(?:quantity|qty)[^\\d]{0,8}(\\d+)/i);
+                if (m) return parseInt(m[1], 10);
+                return 1;
+            });
+        }""")
+    except Exception:
+        return []
+
+
+def _verify_single_phone(page: Page, plan: Plan) -> None:
+    """Stop checkout unless the bag holds exactly ONE of the target phone.
+
+    The bag can silently accumulate duplicates (a retrying Add to Bag, or a
+    leftover from an aborted run). The total cap would catch 2+ phones at the
+    review page, but that's the last line of defense -- catch it here, before
+    a single checkout step runs. Fails safe: if we can't read the bag contents
+    at all, we stop rather than guess.
+    """
+    qtys = _bag_item_quantities(page)
+    n_items = len(qtys)
+    total_units = sum(qtys)
+    if n_items == 0:
+        # No item containers found. Either the bag is genuinely empty (nothing
+        # to buy -- also wrong) or the markup changed and we can't tell. The
+        # body text decides: if a Check Out button exists there's *something*
+        # in the bag we couldn't parse, which is worse -- stop either way.
+        if find_visible(page, CHECKOUT_BTN, timeout=0) is not None:
+            _stop(page, "bag", "couldn't read the bag's items — not risking an unknown quantity")
+        _stop(page, "bag", "bag is empty — Add to Bag didn't register")
+    if n_items != 1 or total_units != 1:
+        _stop(page, "bag",
+              f"bag holds {total_units} item(s) across {n_items} line(s), expected exactly 1 "
+              f"— remove extras and retry")
+    if plan.check_model_name:
+        text = _norm(body_text(page))
+        if _norm(plan.model.name) not in text:
+            _stop(page, "bag", f"the bag's item isn't '{plan.model.name}'")
+
+
 # ── the flow ──────────────────────────────────────────────────────────────────
 def run(page: Page, plan: Plan) -> Result:
     """Drive checkout from the bag page. Raises CheckoutStopped on any doubt."""
@@ -308,6 +373,10 @@ def _run(page: Page, plan: Plan, mark=lambda name: None) -> Result:
                              "(delete ~/.duo-tracker/order.lock to allow another)")
     if "/shop/bag" not in page.url:
         page.goto(BAG_URL, wait_until="domcontentloaded", timeout=60_000)
+
+    # 0. Prove the bag holds exactly ONE of the target phone before any step.
+    _verify_single_phone(page, plan)
+    mark("bag verified")
 
     # 1. Check Out
     guard(page, "bag")

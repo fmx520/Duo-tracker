@@ -42,7 +42,12 @@ def open_context(pw: Playwright, cfg: Config) -> BrowserContext:
             "after `scripts/install-linux-service.sh` (it provides a virtual screen you can VNC into), "
             "or prefix with `xvfb-run -a`.")
     cfg.profile_dir.mkdir(parents=True, exist_ok=True)
-    kwargs = dict(user_data_dir=str(cfg.profile_dir), headless=False, no_viewport=True)
+    # Playwright disables Chrome's sandbox by default. Keep it on: this browser
+    # holds a signed-in Apple account and a saved card, so running it with process
+    # isolation off is a poor trade. It is a local setting -- sites cannot observe
+    # it either way, so this changes nothing about how we present ourselves.
+    kwargs = dict(user_data_dir=str(cfg.profile_dir), headless=False, no_viewport=True,
+                  chromium_sandbox=True)
     if cfg.browser_channel and cfg.browser_channel != "chromium":
         try:
             return pw.chromium.launch_persistent_context(channel=cfg.browser_channel, **kwargs)

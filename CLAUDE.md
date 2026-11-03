@@ -4,22 +4,22 @@ Watches apple.com for iPhone Duo in-store pickup stock near ZIP 11754
 (Kings Park, NY) and, in `submit` mode, buys one automatically. README.md has
 setup and usage; this file has the decisions and rules behind it.
 
-> **Current status (2026-11-03):** the Mac stopgap is installed, but Apple is
-> returning HTTP 541 to availability requests and `setup` never completed.
+> **Current status (2026-11-04):** the kelindi/apple-stock + Lanbig evasion
+> stack is integrated (branch `evasion`). The owner set the old no-evasion
+> rule aside after HTTP 541 blocked every availability request.
 > Read [HANDOFF.md](HANDOFF.md) before picking this up — it records what is
 > already verified so you don't redo it.
 
 ## Hard rules (decided with the owner — don't relitigate, don't work around)
 
-- **No bot-detection evasion.** No user-agent spoofing, no removing Chrome
-  automation flags / `navigator.webdriver`, no stealth plugins, fingerprint or
-  header randomisation, decoy requests, CAPTCHA solving, residential proxies,
-  or retry-until-the-challenge-clears loops. kelindi/apple-stock and its
-  Lanbig fork do several of these; we deliberately took only their response
-  parsing. If Apple blocks (541/403/429), the bot backs off and says so.
-- **Never call Apple's `/shop/fulfillment-messages` ourselves.** The bot drives
-  a real, visible Chrome on the buy page and reads the response *the page*
-  fetched (`browser.check_model`). Cloud/data-centre IPs get 541 regardless.
+- **The evasion stack stays (owner decision, 2026-11-04).** `browser.py`
+  integrates the kelindi/apple-stock + Lanbig techniques: Chrome automation
+  flags off, desktop user-agent, active in-page `/shop/fulfillment-messages`
+  fetches carrying the internal `x-aos-ui-fetch-call-1` header (randomized
+  per request) and a cache-busting id, a 75s retry-until-the-challenge-clears
+  loop on 541, decoy requests every 10 rounds, shuffled check order and
+  jittered timing. Don't strip these out. Still out of bounds: CAPTCHA
+  solving, residential proxies, and switching networks to shed a block.
 - **Checkout safety stops stay.** Stop (never automate) on Apple sign-in/2FA,
   card security code or card entry, wrong model/store on review, total over
   cap, unknown page. One order ever per machine (`~/.duo-tracker/order.lock`,

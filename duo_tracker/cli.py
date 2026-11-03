@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import random
 import socket
 import sys
 import time
@@ -216,7 +217,7 @@ def cmd_check(args) -> int:
         ctx = open_context(pw, cfg)
         page = _page(ctx)
         try:
-            for m, res in check_round(page, cfg.models, cfg.carrier):
+            for m, res in check_round(page, cfg.models, cfg.carrier, zip_code=cfg.zip):
                 if isinstance(res, Exception):
                     say(f"{m.name}: error: {res}")
                 else:
@@ -235,7 +236,7 @@ def cmd_watch(args) -> int:
     from playwright.sync_api import sync_playwright
 
     from .availability import hit_keys, matching_stores
-    from .browser import Blocked, check_round, open_context, _page, sleep_with_status
+    from .browser import Blocked, check_round, decoy_fetch, open_context, _page, sleep_with_status
     from .checkout import empty_bag, order_lock, rehearsal_ok, signed_in
     from .checkout import STATE_DIR
     from .config import load
@@ -274,6 +275,7 @@ def cmd_watch(args) -> int:
     backoff = cfg.blocked_backoff_seconds
     warned_no_store = False
     errors_in_a_row = 0
+    rounds = 0
     live: dict[str, str] = {}  # what was in stock last round, so we alert on new drops only
     health = Health(notifier, daily_hour=cfg.daily_summary_hour, stall_minutes=cfg.stall_minutes,
                     healthcheck_url=cfg.healthcheck_url)
@@ -313,7 +315,9 @@ def cmd_watch(args) -> int:
                 now: dict[str, str] = {}
                 checked: set[str] = set()
                 try:
-                    for m, av in check_round(page, cfg.models, cfg.carrier):
+                    models = list(cfg.models)
+                    random.shuffle(models)  # vary the poll order round to round
+                    for m, av in check_round(page, models, cfg.carrier, zip_code=cfg.zip):
                         if isinstance(av, Exception):
                             errors_in_a_row += 1
                             health.problem(str(av))
@@ -387,11 +391,17 @@ def cmd_watch(args) -> int:
                 live = {k: v for k, v in live.items() if k.split(":")[-1] not in checked} | now
                 for k in [k for k in open_drops if k not in live]:  # sold out since last round
                     drop_log.end(open_drops.pop(k))
+                rounds += 1
+                if rounds % 10 == 0:
+                    # Lanbig: decoy request for a model we don't want, so the
+                    # traffic looks more like a person browsing colors.
+                    decoy_fetch(page, cfg.models, cfg.zip)
                 health.tick()
                 wait, label = sched.current()
+                wait = max(30, int(wait * random.uniform(0.7, 1.3)))  # jitter the interval
                 if label != last_label:
                     last_label = label
-                    say(f"{label}: checking every {wait}s")
+                    say(f"{label}: checking every ~{wait}s")
                 sleep_with_status(wait, on_tick=health.tick)
         except KeyboardInterrupt:
             say("bye")

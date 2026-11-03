@@ -4,6 +4,11 @@ Watches apple.com for iPhone Duo in-store pickup stock near ZIP 11754
 (Kings Park, NY) and, in `submit` mode, buys one automatically. README.md has
 setup and usage; this file has the decisions and rules behind it.
 
+> **Current status (2026-11-03):** the Mac stopgap is installed, but Apple is
+> returning HTTP 541 to availability requests and `setup` never completed.
+> Read [HANDOFF.md](HANDOFF.md) before picking this up — it records what is
+> already verified so you don't redo it.
+
 ## Hard rules (decided with the owner — don't relitigate, don't work around)
 
 - **No bot-detection evasion.** No user-agent spoofing, no removing Chrome

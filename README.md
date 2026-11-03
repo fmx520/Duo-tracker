@@ -7,6 +7,12 @@ chooses pickup at that store, picks the earliest pickup time, pays with your
 saved card, and places the order. It stops and hands you the window the moment
 anything looks off.
 
+> **Status, 2026-11-03:** the Mac stopgap install is complete, but Apple is
+> returning HTTP 541 to availability requests and `./duo setup` has not
+> completed. Before working on this, read **[HANDOFF.md](HANDOFF.md)** — it
+> records what is already verified so you don't redo it. AI agents: see
+> **[AGENTS.md](AGENTS.md)**.
+
 ## How it works (and what it deliberately doesn't do)
 
 - It drives **a real, visible Chrome window** on your Mac, using its own

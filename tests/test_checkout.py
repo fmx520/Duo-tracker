@@ -24,7 +24,10 @@ PRICES = {MODEL.part: MODEL.price, "ACC1": 19}
 NAMES = {MODEL.part: MODEL.name, "ACC1": "USB-C Charge Cable (1 m)"}
 STORES = {"R095": "Fifth Avenue", "R001": "SoHo"}
 
-PAGE = "<!doctype html><html><head><title>{title}</title></head><body>{body}</body></html>"
+# Every page fires a beacon every 250ms, like Apple's analytics, so the
+# network is never idle; the bot must not depend on it going quiet.
+PAGE = ("<!doctype html><html><head><title>{title}</title></head><body>{body}"
+        "<script>setInterval(() => fetch('/beacon').catch(() => {{}}), 250)</script></body></html>")
 
 
 class FakeApple:
@@ -42,6 +45,8 @@ class FakeApple:
         path = u.path
         html = lambda t, b: route.fulfill(status=200, content_type="text/html", body=self.page(t, b))  # noqa: E731
 
+        if path == "/beacon":
+            return route.fulfill(status=204, body="")
         if path == "/shop/buy-iphone/iphone-duo":
             return html("Buy iPhone Duo", f"""<button data-autom="add-to-cart"
                 onclick="location.href='/shop/bag?added={MODEL.part}'">Add to Bag</button>""")

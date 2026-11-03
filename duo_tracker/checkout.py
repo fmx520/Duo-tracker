@@ -220,13 +220,45 @@ def _stop(page: Page, step: str, reason: str):
     raise CheckoutStopped(step, reason, save_report(page, step, reason))
 
 
-def _click_and_settle(page: Page, el: Locator) -> None:
+def _click_and_settle(page: Page, el: Locator, *, advances: bool = True) -> None:
+    """Click, then wait only as long as the page actually needs.
+
+    Deliberately NOT waiting for "network idle": Apple's pages fire analytics
+    beacons constantly, so that would burn the full timeout on every step.
+    For a button that advances checkout we wait until the URL changes or the
+    button goes away (so we never double-click it); then the caller polls for
+    the next button, which is the real readiness signal.
+    """
+    url = page.url
     el.click(timeout=10_000)
-    page.wait_for_timeout(300)
+    if not advances:
+        page.wait_for_timeout(120)
+        return
+    deadline = time.monotonic() + 6
+    while time.monotonic() < deadline:
+        try:
+            if page.url != url or not el.is_visible():
+                break
+        except Exception:
+            break  # element detached: page moved on
+        page.wait_for_timeout(50)
     try:
-        page.wait_for_load_state("networkidle", timeout=8_000)
+        page.wait_for_load_state("domcontentloaded", timeout=10_000)
     except Exception:
         pass
+
+
+def find_first(page: Page, options: dict, timeout: float = STEP_TIMEOUT_S):
+    """Poll for whichever of several button kinds appears first -> (key, locator) or (None, None)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        for key, specs in options.items():
+            el = find_visible(page, specs, timeout=0)
+            if el is not None:
+                return key, el
+        if time.monotonic() >= deadline:
+            return None, None
+        page.wait_for_timeout(100)
 
 
 # ── bag ───────────────────────────────────────────────────────────────────────
@@ -272,7 +304,8 @@ def _run(page: Page, plan: Plan) -> Result:
     guard(page, "fulfillment")
     choice = find_visible(page, PICKUP_BTN if plan.fulfillment == "pickup" else DELIVERY_BTN, timeout=10)
     if choice:
-        _click_and_settle(page, choice)
+        # On Apple's checkout this reveals options in place rather than navigating.
+        _click_and_settle(page, choice, advances=False)
     elif plan.fulfillment == "pickup":
         _stop(page, "fulfillment", "couldn't find the pickup option")
 
@@ -284,12 +317,10 @@ def _run(page: Page, plan: Plan) -> Result:
     # 3. Click through Continue… until the review page
     for i in range(MAX_CONTINUE_STEPS):
         guard(page, f"step {i + 1}")
-        if find_visible(page, PLACE_ORDER_BTN, timeout=0.5):
+        kind, nxt = find_first(page, {"place": PLACE_ORDER_BTN, "continue": CONTINUE_BTN})
+        if kind == "place":
             break
-        nxt = find_visible(page, CONTINUE_BTN)
-        if not nxt:
-            if find_visible(page, PLACE_ORDER_BTN, timeout=2):
-                break
+        if kind is None:
             _stop(page, f"step {i + 1}", "no Continue or Place Order button")
         _click_and_settle(page, nxt)
     else:
@@ -356,14 +387,14 @@ def _choose_store(page: Page, plan: Plan) -> str:
             el = lbl.first if lbl.count() else None
         if el is None:
             _stop(page, "store", f"store {plan.store_name or plan.store_number} not offered at checkout")
-        _click_and_settle(page, el)
+        _click_and_settle(page, el, advances=False)
         return plan.store_name
     # rehearsal: take the first enabled store radio
     el = find_visible(page, ['input[type="radio"][name*="store" i]:not([disabled])'], timeout=10)
     if el is None:
         _stop(page, "store", "no pickup store offered")
     label = el.evaluate("e => (e.labels && e.labels[0] ? e.labels[0].innerText : '').split('\\n')[0].trim()")
-    _click_and_settle(page, el)
+    _click_and_settle(page, el, advances=False)
     return label or ""
 
 

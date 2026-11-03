@@ -301,10 +301,14 @@ def _bag_item_quantities(page: Page) -> list[int]:
     """
     try:
         return page.evaluate("""() => {
-            const items = [...document.querySelectorAll('[data-autom^="bag-item"]')]
-                .filter(e => e.querySelector('[data-autom*="remove" i], select, [data-autom*="quantity" i]')
-                        || /remove/i.test(e.innerText || ''));
-            return items.map(it => {
+            // Keep only outermost bag-item containers; Apple's remove button is
+            // data-autom="bag-item-remove-button" and sits INSIDE the row, so
+            // without this one phone would count as two.
+            const all = [...document.querySelectorAll('[data-autom^="bag-item"], [data-autom^="bagItem"], [data-autom^="rs-bag-item"]')];
+            const rows = all.filter(e =>
+                !/remove/i.test(e.getAttribute('data-autom') || '') &&
+                !all.some(other => other !== e && other.contains(e)));
+            return rows.map(it => {
                 const sel = it.querySelector('select');
                 if (sel && sel.value && /^\\d+$/.test(sel.value)) return parseInt(sel.value, 10);
                 const m = (it.innerText || '').match(/(?:quantity|qty)[^\\d]{0,8}(\\d+)/i);

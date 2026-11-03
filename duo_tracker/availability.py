@@ -7,6 +7,7 @@ kelindi/apple-stock's parser (MIT).
 """
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass, field
 
@@ -36,10 +37,21 @@ class Availability:
         return [s for s in self.stores if s.available]
 
 
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+
+
+def _plain(text: str) -> str:
+    """Apple's quote fields (stickyMessageSTH/IDL, pickupSearchQuote, ...) carry
+    markup like <span class="bold">Mon, Jan 25</span>. Strip it: these strings go
+    to the terminal and into push notifications, where the tags are unreadable."""
+    return _WS_RE.sub(" ", html.unescape(_TAG_RE.sub("", text))).strip()
+
+
 def _first_str(*vals) -> str:
     for v in vals:
         if isinstance(v, str) and v.strip():
-            return v.strip()
+            return _plain(v)
     return ""
 
 

@@ -3,7 +3,7 @@
 * Daily summary: "still watching, N checks, M drops" at a set hour.
 * Stall alert: no successful check for N minutes (once, then "recovered").
 * Dead-man switch: optional healthchecks.io-style URL pinged after successful
-  checks. If the box loses power or internet, *that* service alerts you,
+  checks (or, in trigger mode, while the trigger subscription is connected). If the box loses power or internet, *that* service alerts you,
   because a dead box can't alert anyone itself.
 """
 from __future__ import annotations
@@ -22,8 +22,9 @@ log = logging.getLogger(__name__)
 class Health:
     def __init__(self, notifier, *, daily_hour: int | None = 9, stall_minutes: int = 10,
                  healthcheck_url: str = "", clock: Callable[[], float] = time.time,
-                 now: Callable[[], datetime] = datetime.now, http_get=None):
+                 now: Callable[[], datetime] = datetime.now, http_get=None, kind: str = "poll"):
         self.notifier = notifier
+        self.kind = kind  # "poll": healthy = checks succeed; "trigger": healthy = subscription connected
         self.daily_hour = daily_hour
         self.stall_s = stall_minutes * 60
         self.hc_url = healthcheck_url.rstrip("/")
@@ -34,6 +35,7 @@ class Health:
         self.last_problem = ""
         self.stall_notified = False
         self.checks = self.drops = self.blocks = 0
+        self.triggers = self.rejected = 0
         self.last_ping = 0.0
         self.last_summary_day = now().date() if daily_hour is not None and now().hour >= daily_hour else None
 
@@ -47,6 +49,23 @@ class Health:
             self.ping(force=True)  # clear the dead-man switch's "down" state right away
             return
         self.ping()
+
+    def alive(self) -> None:
+        """Trigger mode heartbeat: the subscription is connected (open or keepalive)."""
+        self.last_success = self.clock()
+        if self.stall_notified:
+            self.stall_notified = False
+            self.notifier.send("Duo-tracker recovered", "Trigger listener is connected again.",
+                               urgent=False, tags="white_check_mark")
+            self.ping(force=True)
+            return
+        self.ping()
+
+    def trigger(self, accepted: bool) -> None:
+        if accepted:
+            self.triggers += 1
+        else:
+            self.rejected += 1
 
     def problem(self, reason: str) -> None:
         self.last_problem = reason
@@ -67,7 +86,8 @@ class Health:
             self.stall_notified = True
             mins = int((t - self.last_success) // 60)
             why = f" Last problem: {self.last_problem}" if self.last_problem else ""
-            self.notifier.send("⚠️ Duo-tracker stalled", f"No successful check for {mins} min.{why}",
+            what = "Trigger listener disconnected" if self.kind == "trigger" else "No successful check"
+            self.notifier.send("⚠️ Duo-tracker stalled", f"{what} for {mins} min.{why}",
                                urgent=False, tags="warning")
             self.ping(fail=True)
 
@@ -75,12 +95,17 @@ class Health:
         if self.daily_hour is not None and now.hour >= self.daily_hour and self.last_summary_day != now.date():
             self.last_summary_day = now.date()
             state = "⚠️ currently stalled" if self.stall_notified else "healthy"
+            if self.kind == "trigger":
+                counts = (f"{self.triggers} triggers accepted, {self.rejected} rejected, "
+                          f"{self.drops} confirmed drops, {self.blocks} Apple blocks")
+            else:
+                counts = f"{self.checks} checks, {self.drops} drops, {self.blocks} Apple blocks"
             self.notifier.send(
                 "Duo-tracker daily check-in",
-                f"{socket.gethostname()}: {state}. {self.checks} checks, {self.drops} drops, "
-                f"{self.blocks} Apple blocks since last check-in.",
+                f"{socket.gethostname()}: {state}. {counts} since last check-in.",
                 urgent=False, tags="calendar")
             self.checks = self.drops = self.blocks = 0
+            self.triggers = self.rejected = 0
 
     def ping(self, fail: bool = False, force: bool = False) -> bool:
         """Ping the dead-man switch. True only if a ping actually went out.

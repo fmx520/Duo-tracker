@@ -27,7 +27,10 @@ case "$cmd" in
 ./duo setup       sign in to Apple + pick your store in the bot's browser
 ./duo check       check stock once
 ./duo rehearse    practice checkout (never orders); arms auto-buy for 7 days
-./duo watch       run in this terminal
+./duo watch       run in this terminal (polls, or listens in trigger mode)
+./duo trigger-init  private trigger topic + signing secret → config.yaml
+./duo trigger-send  publish one signed trigger (testing; --yes to send)
+./duo trigger-env [DIR]  copy trigger settings into an apple-stock detector's .env
 ./duo blocks      when Apple blocked checks (to tune the schedule)
 ./duo drops       every drop seen and what the bot did (--csv FILE to export)
 ./duo logs        follow the log file (full error details are in it)

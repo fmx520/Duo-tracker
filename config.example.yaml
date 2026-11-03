@@ -40,6 +40,9 @@ checkout:
   #          last 7 days, buys at most once (~/.duo-tracker/order.lock), and
   #          stops on sign-in/2FA, security-code prompts, wrong model/store,
   #          or a total over the cap.
+  # trigger – don't poll: wait for a signed trigger from an external detector
+  #          (see `trigger:` below and TRIGGER_MODE.md), confirm it with ONE
+  #          availability check, then act per trigger.action.
   mode: bag
   # max_total: 2250        # hard cap on the order total; default = model price × 1.11
 
@@ -53,3 +56,22 @@ signin_check_minutes: 60   # review/submit modes: confirm you're still signed in
 browser:
   channel: chrome          # uses your installed Google Chrome; "chromium" for Playwright's bundled one
   profile_dir: ~/.duo-tracker/profile
+
+# Trigger mode. `./duo trigger-init` fills topic + secret for you.
+# Anyone with BOTH can wake the bot, so keep them out of chat and git.
+trigger:
+  server: https://ntfy.sh
+  topic: ""                # inbound only; must differ from ntfy.topic
+  secret: ""               # HMAC-SHA256 key, ≥32 chars; triggers without a valid sig are rejected
+  token: ""                # optional ntfy access token (reserved topic) — use it if you can
+  action: submit           # confirmed trigger → submit (needs rehearsal) | review
+  max_age_seconds: 90      # older triggers are rejected
+  reconnect_backoff_seconds: 5
+  # Where triggers come from (any combination):
+  #   ntfy  – signed messages on `topic` (e.g. the kelindi/apple-stock detector)
+  #   radar – poll the public NYC pickup radar (duo-tracker-six.vercel.app,
+  #           ~5s sweeps of 29 stores incl. Manhasset/Roosevelt Field/Walt
+  #           Whitman; NOT Smith Haven). No Apple traffic from your IP.
+  sources: [ntfy]
+  # radar_url: https://duo-tracker-six.vercel.app
+  # radar_poll_seconds: 5   # min 3 — it's someone else's free service

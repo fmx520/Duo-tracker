@@ -242,6 +242,8 @@ See [`config.example.yaml`](config.example.yaml). The settings most people chang
 
 ```bash
 pip install pytest
+playwright install chromium   # the tests need the bundled browser;
+                              # install.sh skips it on macOS when you already have Chrome
 pytest -q
 ```
 

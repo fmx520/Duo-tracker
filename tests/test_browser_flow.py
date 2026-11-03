@@ -51,7 +51,10 @@ def avail_json(part, display):
 
 @pytest.fixture
 def page_factory():
-    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers")
+    # Only point at the CI browser dir when it actually exists; otherwise leave
+    # PLAYWRIGHT_BROWSERS_PATH alone so Playwright uses its own default cache.
+    if os.path.isdir("/opt/pw-browsers"):
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers")
     with pw_api.sync_playwright() as pw:
         browser = pw.chromium.launch()
 

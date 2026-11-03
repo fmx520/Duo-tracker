@@ -129,7 +129,10 @@ def state_dir(tmp_path, monkeypatch):
 
 @pytest.fixture
 def browser():
-    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers")
+    # Only point at the CI browser dir when it actually exists; otherwise leave
+    # PLAYWRIGHT_BROWSERS_PATH alone so Playwright uses its own default cache.
+    if os.path.isdir("/opt/pw-browsers"):
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers")
     with pw_api.sync_playwright() as pw:
         b = pw.chromium.launch()
         yield b

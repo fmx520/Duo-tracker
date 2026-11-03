@@ -146,6 +146,7 @@ def test_watch_loop_uses_schedule_and_logs_blocks(tmp_path, monkeypatch):
     monkeypatch.setattr(browser, "check_round", fake_round)
     monkeypatch.setattr(browser, "sleep_with_status", fake_sleep)
     monkeypatch.setattr(cli.Notifier, "send", lambda self, *a, **k: True)
+    monkeypatch.setattr(cli.random, "uniform", lambda a, b: 1.0)  # no interval jitter
 
     class PW:
         def __enter__(self): return self

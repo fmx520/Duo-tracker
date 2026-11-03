@@ -1,6 +1,15 @@
 # Trigger mode — design spec
 
-Status: **proposed, not built.** Written 2026-11-04 for whoever implements it.
+Status: **built** (`duo_tracker/trigger.py`, `cli._watch_triggers`, tests in
+`tests/test_trigger.py` cover acceptance criteria 1–7). The external detector
+is still out of scope. Written 2026-11-04.
+
+Implementation notes: `trigger.action` (`submit`|`review`) picks what a
+confirmed trigger does; `submit` still needs a passing rehearsal or it falls
+back to `review`. `seen_at` may be up to 5s in the future (clock skew).
+Rejected-trigger pushes are rate-limited to one per 5 minutes so a flood
+can't bury real alerts. On reconnect the listener asks ntfy for messages
+`since` the last id, so a blip doesn't lose a trigger.
 
 ## What it is
 

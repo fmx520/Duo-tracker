@@ -219,10 +219,25 @@ connection actually tolerates.
 
 ## Planned work
 
-[TRIGGER_MODE.md](TRIGGER_MODE.md) specs a `trigger` checkout mode: an
-external detector publishes a signed "a Duo dropped" message, the bot
-confirms it and buys, instead of polling Apple all day. Proposed, not
-built.
+## Trigger mode
+
+`checkout.mode: trigger` stops polling. An external detector publishes a
+signed "a Duo dropped" message to a private ntfy topic; the bot rejects
+anything unsigned, stale (>90s), replayed, or for a model/store you don't
+watch, then does **one** availability check and only buys if Apple agrees.
+Everything after that is the normal checkout with all its stops.
+
+```bash
+./duo trigger-init                    # private topic + signing secret → config.yaml
+# set  checkout: {mode: trigger}  then
+./duo watch                           # listens; pushes "Trigger rejected" on anything bad
+./duo trigger-send --store R068       # dry run: prints what it would send
+./duo trigger-send --store R068 --bad-sig --yes   # should be rejected, nothing bought
+```
+
+The detector itself is not part of this repo; it must sign payloads as
+described in [TRIGGER_MODE.md](TRIGGER_MODE.md). Measure its lag before
+relying on it — drops near 11754 last ~30-75s.
 
 ## Config
 
@@ -237,7 +252,8 @@ See [`config.example.yaml`](config.example.yaml). The settings most people chang
 | `schedule` | `default_seconds`, plus `windows` of `{start, end, seconds}` in `timezone` (min 30s) |
 | `max_miles` | optional; ignore stores farther than this |
 | `alert_on_courier` | also alert when same-day courier delivery is available |
-| `checkout.mode` | `alert` (push only), `bag` (default), `review` (fill checkout, you click Place Order), or `submit` (full auto) |
+| `checkout.mode` | `alert` (push only), `bag` (default), `review` (fill checkout, you click Place Order), `submit` (full auto), or `trigger` (wait for a signed external trigger) |
+| `trigger.*` | `topic`, `secret`, optional `token`, `action` (`submit`/`review`), `max_age_seconds` — see Trigger mode |
 | `checkout.max_total` | optional hard cap on the order total; default is model price × 1.11 |
 | `health.*` | `daily_summary_hour` (or `null`), `stall_minutes`, `healthcheck_url` |
 | `signin_check_minutes` | how often to confirm you're still signed in to Apple (default 60) |

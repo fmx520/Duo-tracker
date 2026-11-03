@@ -257,6 +257,8 @@ def cmd_watch(args) -> int:
     from .health import Health
 
     cfg = load(args.config)
+    if cfg.checkout_mode == "trigger":
+        return _watch_triggers(cfg)
     sched = cfg.make_schedule(STATE_DIR / "blocks.csv")
     from .drops import DropLog
     drop_log = DropLog(STATE_DIR / "drops.jsonl")
@@ -486,6 +488,247 @@ def _act_on_hit(page, cfg, notifier, model, stores) -> dict:
         return result | {"outcome": "needs you", "detail": f"error: {str(e)[:200]}"}
 
 
+# ── trigger mode (TRIGGER_MODE.md) ─────────────────────────────────────────────
+REJECT_ALERT_EVERY_S = 300  # rejected triggers alert, but at most this often (flood guard)
+
+
+def _hold_after_acting(health) -> None:
+    """After a checkout attempt: stop acting, keep the dead-man switch fed."""
+    say("Stopped listening. Browser stays open — press Ctrl-C when done.")
+    while True:
+        time.sleep(60)
+        health.ping()
+
+
+def _watch_triggers(cfg, listen_fn=None) -> int:
+    """Wait for signed triggers; on one, confirm with Apple and run the normal checkout."""
+    import dataclasses
+
+    from playwright.sync_api import sync_playwright
+
+    from . import trigger as trig
+    from .browser import open_context, _page
+    from .checkout import STATE_DIR, empty_bag, order_lock, rehearsal_ok, signed_in
+    from .drops import DropLog
+    from .health import Health
+
+    notifier = Notifier(cfg.ntfy_server, cfg.ntfy_topic)
+    if not cfg.ntfy_topic:
+        say("warning: no ntfy.topic set — alerts will only print here.")
+    if (lock := order_lock()):
+        say(f"Refusing to run: this tool already placed an order ({lock.get('model')} at "
+            f"{lock.get('store')}, {lock.get('at')}). Delete ~/.duo-tracker/order.lock to allow another.")
+        return EXIT_NO_RESTART
+    action = cfg.trigger_action
+    if action == "submit":
+        ok, why = rehearsal_ok()
+        if ok:
+            say(f"Auto-buy armed ({why}). Caps: " +
+                ", ".join(f"{m.key} ≤ ${cfg.cap_for(m):,.2f}" for m in cfg.models))
+        else:
+            action = "review"
+            say(f"Auto-buy NOT armed ({why}). Confirmed triggers will fill checkout; you tap Place Order.")
+            notifier.send("Auto-buy not armed", f"{why}. Trigger mode will fill checkout and you tap "
+                          "Place Order. Run `./duo rehearse` to re-arm.", urgent=False, tags="warning")
+    act_cfg = dataclasses.replace(cfg, checkout_mode=action)
+    nonces = trig.NonceStore(STATE_DIR / "trigger-nonces.json")
+    drop_log = DropLog(STATE_DIR / "drops.jsonl")
+    health = Health(notifier, daily_hour=cfg.daily_summary_hour, stall_minutes=cfg.stall_minutes,
+                    healthcheck_url=cfg.healthcheck_url, kind="trigger")
+    listen_fn = listen_fn or trig.listen
+    state = {"last_reject_alert": 0.0, "last_signin_check": 0.0, "signed_out": False}
+
+    with sync_playwright() as pw:
+        ctx = open_context(pw, cfg)
+        page = _page(ctx)
+        n = empty_bag(page)
+        if n:
+            say(f"Emptied {n} item(s) from your bag so checkout only contains the phone.")
+        say(f"Trigger mode: listening on the trigger topic for {', '.join(m.key for m in cfg.models)}. "
+            f"Confirmed drops → {action}. Ctrl-C to stop.")
+        notifier.send("Duo-tracker started", f"Trigger mode on {socket.gethostname()} "
+                      f"({', '.join(m.key for m in cfg.models)}; confirmed drops → {action}).",
+                      urgent=False, tags="eyes")
+        try:
+            events = listen_fn(cfg.trigger_server, cfg.trigger_topic, token=cfg.trigger_token,
+                               backoff_s=cfg.trigger_reconnect_backoff_seconds)
+            for ev in events:
+                if ev.kind in ("connected", "keepalive"):
+                    if ev.kind == "connected":
+                        say("trigger listener connected")
+                    health.alive()
+                    _trigger_signin_check(page, cfg, notifier, state, signed_in)
+                elif ev.kind == "disconnected":
+                    health.problem(f"trigger listener: {ev.text}")
+                    say(f"trigger listener disconnected ({ev.text}); reconnecting", logging.WARNING)
+                elif ev.kind == "message":
+                    result = _handle_trigger(ev.text, page=page, cfg=cfg, act_cfg=act_cfg, notifier=notifier,
+                                             health=health, nonces=nonces, drop_log=drop_log, state=state)
+                    if result is not None:
+                        _hold_after_acting(health)
+                        return 0
+                health.tick()
+        except PermissionError as e:
+            say(str(e), logging.ERROR)
+            notifier.send("Duo-tracker can't listen for triggers", str(e), urgent=False, tags="warning")
+            return EXIT_NO_RESTART
+        except KeyboardInterrupt:
+            say("bye")
+        finally:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+    return 0
+
+
+def _trigger_signin_check(page, cfg, notifier, state, signed_in) -> None:
+    if time.monotonic() - state["last_signin_check"] < cfg.signin_check_minutes * 60:
+        return
+    state["last_signin_check"] = time.monotonic()
+    try:
+        ok = signed_in(page)
+    except Exception as e:
+        say(f"sign-in check failed: {e}", logging.WARNING, exc=e)
+        return
+    if not ok and not state["signed_out"]:
+        state["signed_out"] = True
+        say("Signed out of Apple — run `./duo setup` and sign in, or checkout will stop.", logging.WARNING)
+        notifier.send("⚠️ Signed out of Apple", "Sign back in on the tracker's browser, or a triggered "
+                      "checkout will stop at sign-in.", tags="warning")
+    elif ok and state["signed_out"]:
+        state["signed_out"] = False
+        notifier.send("Signed back in", "Triggered checkout is ready again.", urgent=False, tags="white_check_mark")
+
+
+def _handle_trigger(raw, *, page, cfg, act_cfg, notifier, health, nonces, drop_log, state) -> dict | None:
+    """Validate one trigger, confirm it with Apple, and act. None = nothing was attempted."""
+    from . import trigger as trig
+    from .availability import matching_stores
+    from .browser import Blocked, check_round
+
+    by_part = {m.part: m for m in cfg.models}
+    try:
+        t = trig.validate(raw, secret=cfg.trigger_secret, parts=set(by_part), store_allowed=cfg.store_allowed,
+                          max_age_seconds=cfg.trigger_max_age_seconds, nonces=nonces)
+    except trig.TriggerRejected as e:
+        health.trigger(False)
+        say(f"REJECTED trigger: {e}. Nothing bought.", logging.WARNING)
+        if time.monotonic() - state["last_reject_alert"] >= REJECT_ALERT_EVERY_S or not state["last_reject_alert"]:
+            state["last_reject_alert"] = time.monotonic()
+            notifier.send("⚠️ Trigger rejected", f"{e}. Nothing was bought. If your detector didn't send this, "
+                          "someone knows the trigger topic: run `./duo trigger-init --rotate`.", tags="warning")
+        return None
+
+    health.trigger(True)
+    m = by_part[t.part]
+    say(f"Trigger: {m.name} at {t.store_number} (seen {t.age():.0f}s ago) — confirming with Apple")
+    av = None
+    try:
+        for _m, av in check_round(page, [m], cfg.carrier, zip_code=cfg.zip, retry_budget=30):
+            pass
+    except Blocked as e:
+        av = e
+    if av is None or isinstance(av, Exception):
+        why = f"Apple blocked the check ({av})" if isinstance(av, Blocked) else f"check failed: {av}"
+        if isinstance(av, Blocked):
+            health.blocks += 1
+        say(f"Couldn't confirm trigger: {why}. Nothing bought.", logging.WARNING)
+        notifier.send(f"Trigger for {m.name} — couldn't confirm", f"{why}. Nothing bought. Check the "
+                      "Apple app yourself.", click=BUY_URL)
+        return None
+
+    stores = matching_stores(av, cfg.store_filter, cfg.max_miles)
+    if t.store_number.lower() not in {s.store_number.lower() for s in stores}:
+        others = ", ".join(s.store_name for s in stores) or "none"
+        say(f"Trigger did not match stock: {m.name} not in stock at {t.store_number} "
+            f"(in-stock matching stores: {others}). Nothing bought.", logging.WARNING)
+        notifier.send("Trigger did not match stock", f"{m.name} at {t.store_number}: Apple says no. "
+                      f"In stock nearby: {others}. Nothing bought.", urgent=False, tags="warning")
+        return None
+
+    health.drop()
+    named = next(s for s in stores if s.store_number.lower() == t.store_number.lower())
+    say(f"🚨 DROP (trigger confirmed): {m.name} — {', '.join(s.store_name for s in stores)}")
+    notifier.send(f"🚨 {m.name} IN STOCK", f"Trigger confirmed: {', '.join(s.store_name for s in stores[:4])}. "
+                  f"${m.price}", click=BUY_URL)
+    drop_id = drop_log.start(key=f"pickup:{named.store_number}:{m.part}", model=m.name, part=m.part,
+                             store=named.store_name, store_number=named.store_number, kind="pickup",
+                             notice_gap_s=t.age(), window="trigger")
+    result = _act_on_hit(page, act_cfg, notifier, m, stores)
+    drop_log.outcome(drop_id, result["outcome"], result.get("detail", ""), result.get("checkout_s"))
+    return result
+
+
+def cmd_trigger_init(args) -> int:
+    """Generate a private inbound topic + HMAC secret and write them into config.yaml."""
+    import re
+    import secrets as _secrets
+    from pathlib import Path
+
+    path = Path(args.config)
+    text = path.read_text()
+    topic = "duo-trigger-" + _secrets.token_hex(12)
+    secret = _secrets.token_hex(32)
+    block = re.search(r"(?m)^trigger:[^\n]*\n((?:[ \t]+[^\n]*\n?|[ \t]*\n)*)", text)
+    if block and not args.rotate:
+        print("config already has a `trigger:` section. Use --rotate to replace its topic and secret.")
+        return 1
+    if block:
+        body = block.group(1)
+        new = re.sub(r"(?m)^(\s+topic:).*$", lambda mm: f'{mm.group(1)} "{topic}"', body)
+        new = re.sub(r"(?m)^(\s+secret:).*$", lambda mm: f'{mm.group(1)} "{secret}"', new)
+        if new == body:
+            print("couldn't find topic:/secret: lines under `trigger:`; edit config.yaml by hand.")
+            return 1
+        text = text[:block.start(1)] + new + text[block.end(1):]
+    else:
+        text = text.rstrip("\n") + (
+            "\n\n# Trigger mode (TRIGGER_MODE.md). Private: anyone with topic+secret can wake the bot.\n"
+            "trigger:\n"
+            "  server: https://ntfy.sh\n"
+            f'  topic: "{topic}"     # inbound only; never the ntfy alert topic\n'
+            f'  secret: "{secret}"\n'
+            '  token: ""             # optional ntfy access token (reserved topic)\n'
+            "  action: submit        # what a confirmed trigger does: submit | review\n"
+            "  max_age_seconds: 90\n"
+            "  reconnect_backoff_seconds: 5\n")
+    path.write_text(text)
+    path.chmod(0o600)
+    print(f"Wrote a new trigger topic and secret to {path} (file is now private to you).")
+    print("Give both to your detector; it must sign payloads as in TRIGGER_MODE.md.")
+    print("Then set `checkout: {mode: trigger}` and run ./duo watch.")
+    return 0
+
+
+def cmd_trigger_send(args) -> int:
+    """Publish one signed trigger — to test the listener end to end, or as a manual detector."""
+    from datetime import datetime, timedelta, timezone
+
+    from . import trigger as trig
+    from .catalog import resolve
+    from .config import load
+
+    cfg = load(args.config)
+    if not (cfg.trigger_topic and cfg.trigger_secret):
+        print("No trigger topic/secret in config. Run `./duo trigger-init` first.")
+        return 1
+    model = resolve(args.model) if args.model else cfg.models[0]
+    seen = datetime.now(timezone.utc).astimezone() - timedelta(seconds=args.age)
+    payload = trig.make(model.part, args.store.upper(), cfg.trigger_secret, seen_at=seen)
+    if args.bad_sig:
+        payload["sig"] = "0" * 64
+    print(f"Trigger: {model.name} at {args.store.upper()}, seen_at {payload['seen_at']}"
+          + (" (deliberately bad signature)" if args.bad_sig else ""))
+    if not args.yes:
+        print("A listening bot will check Apple and, if that store really has it, run checkout "
+              f"(action: {cfg.trigger_action}). Re-run with --yes to send.")
+        return 1
+    trig.publish(cfg.trigger_server, cfg.trigger_topic, payload, token=cfg.trigger_token)
+    print("sent")
+    return 0
+
+
 def cmd_rehearse(args) -> int:
     """Walk the full checkout without placing anything; arms `submit` mode on success."""
     from playwright.sync_api import sync_playwright
@@ -599,6 +842,16 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("notify-test", help="send a test push, and ping the healthcheck if set").set_defaults(fn=cmd_notify_test)
     sub.add_parser("check", help="check each model once and print results").set_defaults(fn=cmd_check)
     sub.add_parser("watch", help="keep checking; act on stock per checkout.mode").set_defaults(fn=cmd_watch)
+    ti = sub.add_parser("trigger-init", help="create a private trigger topic + signing secret in config.yaml")
+    ti.add_argument("--rotate", action="store_true", help="replace an existing topic and secret")
+    ti.set_defaults(fn=cmd_trigger_init)
+    ts = sub.add_parser("trigger-send", help="publish one signed trigger (testing / manual detector)")
+    ts.add_argument("--store", required=True, help="store number, e.g. R068")
+    ts.add_argument("--model", help="model key (default: first in config)")
+    ts.add_argument("--age", type=int, default=0, help="backdate seen_at by N seconds (test expiry)")
+    ts.add_argument("--bad-sig", action="store_true", help="send a wrongly signed trigger (test rejection)")
+    ts.add_argument("--yes", action="store_true", help="actually send it")
+    ts.set_defaults(fn=cmd_trigger_send)
     sub.add_parser("blocks", help="summarize when Apple blocked checks, to tune the schedule").set_defaults(fn=cmd_blocks)
     d = sub.add_parser("drops", help="every drop seen and what the bot did about it")
     d.add_argument("--days", type=int, default=7)

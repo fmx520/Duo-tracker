@@ -1,30 +1,64 @@
-"""Drive a real, visible browser on Apple's buy page and read what the page fetches.
+"""Drive a real browser on Apple's buy page and ask for stock from inside it.
 
-Ground rules this module sticks to on purpose:
-  * It uses YOUR browser profile, visible on screen, at a fixed polite interval.
-  * It never calls Apple's APIs directly and has no stealth/fingerprint tricks.
-  * If Apple refuses (541/403/429 or a challenge), it backs off and tells you.
-    It does not try to get around the block.
-  * It never places an order. At most it adds to bag and opens checkout;
-    you confirm and pay.
+Anti-bot evasion stack, ported from kelindi/apple-stock (MIT) plus the Lanbig
+fork's additions:
+
+  * Chrome launches with its automation tells switched off
+    (``--disable-blink-features=AutomationControlled``, and Playwright's
+    ``--enable-automation`` flag dropped), so the page can't trivially tell
+    software is driving it.
+  * The context presents a normal desktop-Chrome identity (user agent, locale,
+    timezone) instead of automation defaults.
+  * Availability comes from an **active in-page fetch** of
+    ``/shop/fulfillment-messages``: the request runs in the page's own JS
+    context -- same origin, same cookies -- carrying the page's internal
+    ``x-aos-ui-fetch-call-1`` header with a fresh random value, plus a random
+    cache-busting query id, so no two requests look identical.
+  * On HTTP 541 (Apple's proof-of-work challenge not cleared yet) the round
+    reloads the page and keeps retrying for up to 75 seconds instead of
+    giving up on the first refusal.
+  * Every 10th round asks about a model we don't want (decoy traffic), the
+    check order is shuffled, and all timing is jittered, so the traffic reads
+    more like a person browsing than a metronome.
+
+It still never places an order unless ``checkout.mode`` says so, and every
+checkout safety stop is unchanged.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import random
+import secrets
 import sys
 import time
-from urllib.parse import unquote
+from urllib.parse import urlencode
 
 from playwright.sync_api import BrowserContext, Page, Playwright, TimeoutError as PWTimeout
 
 from .availability import Availability, parse
-from .catalog import BAG_URL, BUY_URL, Model
+from .catalog import BAG_URL, BUY_URL, MODELS, Model
 from .config import Config
 
 log = logging.getLogger(__name__)
 
 BLOCKED_STATUSES = {403, 429, 503, 541}
+
+# A normal desktop-Chrome user agent. Automation builds advertise themselves
+# here ("HeadlessChrome" etc.), and Apple's shield rejects those.
+REAL_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+# How long a round rides out a 541 (Apple's proof-of-work challenge) by
+# reloading and retrying before it gives up and reports the block.
+RETRY_BUDGET_SECONDS = 75
+
+# How often (in watch rounds) to mix in a decoy request for a model we don't want.
+DECOY_EVERY_ROUNDS = 10
 
 
 class NoScreenError(RuntimeError):
@@ -32,7 +66,7 @@ class NoScreenError(RuntimeError):
 
 
 class Blocked(Exception):
-    """Apple refused the page's availability request."""
+    """Apple refused the availability request."""
 
 
 def open_context(pw: Playwright, cfg: Config) -> BrowserContext:
@@ -46,14 +80,76 @@ def open_context(pw: Playwright, cfg: Config) -> BrowserContext:
     # holds a signed-in Apple account and a saved card, so running it with process
     # isolation off is a poor trade. It is a local setting -- sites cannot observe
     # it either way, so this changes nothing about how we present ourselves.
-    kwargs = dict(user_data_dir=str(cfg.profile_dir), headless=False, no_viewport=True,
-                  chromium_sandbox=True)
+    kwargs = dict(
+        user_data_dir=str(cfg.profile_dir),
+        headless=False,
+        no_viewport=True,
+        chromium_sandbox=True,
+        # kelindi: present as ordinary desktop Chrome, not automation.
+        user_agent=REAL_UA,
+        locale="en-US",
+        timezone_id=cfg.schedule_tz or "America/New_York",
+        args=["--disable-blink-features=AutomationControlled"],
+        ignore_default_args=["--enable-automation"],
+    )
     if cfg.browser_channel and cfg.browser_channel != "chromium":
         try:
             return pw.chromium.launch_persistent_context(channel=cfg.browser_channel, **kwargs)
         except Exception as e:  # channel not installed
             log.warning("could not launch %s (%s); falling back to bundled Chromium", cfg.browser_channel, e)
     return pw.chromium.launch_persistent_context(**kwargs)
+
+
+def _fulfillment_path(part: str, zip_code: str = "") -> str:
+    params = {"fae": "true", "pl": "true", "mts.0": "regular", "parts.0": part}
+    if zip_code:
+        params["location"] = zip_code
+    # Lanbig: a random cache-busting id on every request, so Apple's anti-bot
+    # system never sees two identical URLs.
+    bust = f"_={int(time.time() * 1000)}-{secrets.token_hex(4)}"
+    return f"/shop/fulfillment-messages?{urlencode(params)}&{bust}"
+
+
+def active_fetch(page: Page, part: str, zip_code: str = "") -> dict:
+    """Fetch Apple's stock endpoint from *inside* the page (kelindi's key move).
+
+    The request runs in the page's JavaScript context -- same origin, same
+    cookies -- and carries the internal ``x-aos-ui-fetch-call-1`` header the
+    buy page normally sends, with a fresh random value on every request
+    (Lanbig). Raises Blocked on 541/403/429/503.
+    """
+    status, text = page.evaluate(
+        """async (url) => {
+            const r = await fetch(url, {
+                credentials: 'include',
+                headers: {'x-aos-ui-fetch-call-1': crypto.randomUUID()},
+            });
+            return [r.status, await r.text()];
+        }""",
+        _fulfillment_path(part, zip_code),
+    )
+    if status in BLOCKED_STATUSES:
+        raise Blocked(f"HTTP {status}")
+    if status != 200:
+        raise RuntimeError(f"unexpected HTTP {status} from availability request")
+    try:
+        return json.loads(text)
+    except Exception:
+        raise Blocked("availability response was not JSON (likely a challenge page)")
+
+
+def decoy_fetch(page: Page, watched: list[Model], zip_code: str = "") -> None:
+    """Lanbig's decoy: ask about a model we don't want, so the request stream
+    looks like someone browsing colors instead of polling a fixed list."""
+    pool = [m for m in MODELS.values() if m.part not in {w.part for w in watched}]
+    if not pool:
+        return
+    pick = random.choice(pool)
+    try:
+        active_fetch(page, pick.part, zip_code)
+        log.debug("decoy check: %s", pick.key)
+    except Exception as e:
+        log.debug("decoy check failed (ignored): %s", e)
 
 
 def _page(ctx: BrowserContext) -> Page:
@@ -82,55 +178,52 @@ def load_buy_page(page: Page) -> None:
     page.locator('[data-autom^="dimensionColor"]').first.wait_for(state="attached", timeout=30_000)
 
 
-def check_model(page: Page, model: Model, carrier: str, *, reload: bool = True) -> Availability:
-    """Select ``model`` and parse the availability response the page fetches for it.
+def check_model(page: Page, model: Model, carrier: str, *, reload: bool = True,
+                zip_code: str = "") -> Availability:
+    """Select ``model`` on the buy page, then ask Apple for its availability
+    with an active in-page fetch and parse the answer.
 
-    With ``reload=False`` it reuses the already-loaded buy page: changing the
-    color/capacity makes the page ask Apple about the new part by itself, so a
-    round over several models costs one page load, not one per model.
+    With ``reload=False`` it reuses the already-loaded buy page, so a round
+    over several models costs one page load, not one per model.
     """
     if reload:
         load_buy_page(page)
-
-    def is_ours(r) -> bool:
-        u = unquote(r.url)
-        return "/shop/fulfillment-messages" in u and model.part in u
-
-    try:
-        with page.expect_response(is_ours, timeout=30_000) as info:
-            select_config(page, model, carrier)
-    except PWTimeout:
-        raise RuntimeError("the page never asked Apple for availability (layout may have changed)")
-
-    resp = info.value
-    if resp.status in BLOCKED_STATUSES:
-        raise Blocked(f"HTTP {resp.status}")
-    if resp.status != 200:
-        raise RuntimeError(f"unexpected HTTP {resp.status} from availability request")
-    try:
-        payload = resp.json()
-    except Exception:
-        raise Blocked("availability response was not JSON (likely a challenge page)")
-    return parse(payload, model.part)
+    select_config(page, model, carrier)
+    return parse(active_fetch(page, model.part, zip_code), model.part)
 
 
-def check_round(page: Page, models: list[Model], carrier: str):
-    """Yield (model, Availability | Exception) for each model, loading the page once."""
+def check_round(page: Page, models: list[Model], carrier: str, zip_code: str = "",
+                retry_budget: int = RETRY_BUDGET_SECONDS):
+    """Yield (model, Availability | Exception) for each model, loading the page once.
+
+    On HTTP 541 the round reloads the buy page -- a fresh load re-runs Apple's
+    proof-of-work challenge -- and retries for up to ``retry_budget`` seconds
+    (kelindi's loop) before reporting the block. Model checks are spaced by a
+    small random pause so the rhythm isn't metronomic (Lanbig).
+    """
+    deadline = time.monotonic() + retry_budget
     for i, m in enumerate(models):
-        try:
-            yield m, check_model(page, m, carrier, reload=(i == 0))
-        except Blocked:
-            raise
-        except Exception as first:
-            if i == 0:
-                yield m, first
-                continue
-            try:  # same-page switch didn't fire a request; try once more with a fresh load
-                yield m, check_model(page, m, carrier, reload=True)
-            except Blocked:
-                raise
+        if i:
+            time.sleep(random.uniform(0.8, 2.5))
+        need_load = i == 0
+        while True:
+            try:
+                yield m, check_model(page, m, carrier, reload=need_load, zip_code=zip_code)
+                break
+            except Blocked as e:
+                if "541" not in str(e) or time.monotonic() >= deadline:
+                    raise
+                log.warning("Apple answered 541; reloading the page and retrying (%.0fs left)",
+                            max(0.0, deadline - time.monotonic()))
+                try:
+                    load_buy_page(page)
+                except Exception as reload_err:
+                    log.debug("page reload during 541 retry failed: %s", reload_err)
+                need_load = False
+                time.sleep(random.uniform(2, 4))
             except Exception as e:
                 yield m, e
+                break
 
 
 def go_to_bag(page: Page) -> bool:

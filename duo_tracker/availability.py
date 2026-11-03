@@ -1,9 +1,9 @@
 """Parse the JSON Apple's buy page receives from /shop/fulfillment-messages.
 
-We never call that endpoint ourselves: the watcher captures the response the
-page fetched on its own when a configuration was selected. Parsing is
-defensive because Apple changes this payload without notice. Field names
-cross-checked against kelindi/apple-stock's parser (MIT).
+The watcher fetches that endpoint actively from inside the page's JS context
+(see ``browser.active_fetch``). Parsing is defensive because Apple changes
+this payload without notice. Field names cross-checked against
+kelindi/apple-stock's parser (MIT).
 """
 from __future__ import annotations
 

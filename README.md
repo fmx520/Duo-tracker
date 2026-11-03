@@ -33,10 +33,14 @@ block.
 
 ## Install
 
-The repo is private, so clone it with your GitHub login, then run the installer:
+The repo is private, so log in to GitHub first. On Ubuntu, `gh` comes from snap
+(it isn't in apt on 22.04):
 
 ```bash
-git clone https://github.com/fmx520/Duo-tracker.git && cd Duo-tracker && ./install.sh
+sudo apt update && sudo apt install -y git
+sudo snap install gh            # macOS: brew install gh
+gh auth login                   # GitHub.com → HTTPS → yes, authenticate Git → login with a web browser
+gh repo clone fmx520/Duo-tracker && cd Duo-tracker && ./install.sh
 ```
 
 `install.sh` sets up Python packages and a browser, and on Linux also the

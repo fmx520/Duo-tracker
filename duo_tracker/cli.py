@@ -40,14 +40,28 @@ def cmd_models(_args) -> int:
 def cmd_notify_test(args) -> int:
     from .config import load
 
+    from .health import Health
+
     cfg = load(args.config)
     if not cfg.ntfy_topic:
         print("Set ntfy.topic in your config first.")
         return 1
-    ok = Notifier(cfg.ntfy_server, cfg.ntfy_topic).send(
+    notifier = Notifier(cfg.ntfy_server, cfg.ntfy_topic)
+    ok = notifier.send(
         "Duo-tracker test", "If you see this on your phone, alerts work.", click=BUY_URL, urgent=False
     )
-    print("sent" if ok else "FAILED — check the topic/server")
+    print("ntfy:        sent" if ok else "ntfy:        FAILED — check the topic/server")
+
+    # The dead-man switch is the only alert that still fires when this box is the
+    # thing that died, so check it here rather than find out during an outage.
+    if not cfg.healthcheck_url:
+        print("healthcheck: not set — if this box loses power or its connection, "
+              "nothing will tell you. See health.healthcheck_url.")
+    elif Health(notifier, daily_hour=None, healthcheck_url=cfg.healthcheck_url).ping(force=True):
+        print("healthcheck: pinged — that check should now read 'up'")
+    else:
+        print("healthcheck: FAILED — check health.healthcheck_url")
+        ok = False
     return 0 if ok else 1
 
 
@@ -582,7 +596,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("init", help="interactive setup: writes config.yaml").set_defaults(fn=cmd_init)
     sub.add_parser("models", help="list model keys and part numbers").set_defaults(fn=cmd_models)
     sub.add_parser("setup", help="sign in and choose a store in the bot's browser profile").set_defaults(fn=cmd_setup)
-    sub.add_parser("notify-test", help="send a test push to your ntfy topic").set_defaults(fn=cmd_notify_test)
+    sub.add_parser("notify-test", help="send a test push, and ping the healthcheck if set").set_defaults(fn=cmd_notify_test)
     sub.add_parser("check", help="check each model once and print results").set_defaults(fn=cmd_check)
     sub.add_parser("watch", help="keep checking; act on stock per checkout.mode").set_defaults(fn=cmd_watch)
     sub.add_parser("blocks", help="summarize when Apple blocked checks, to tune the schedule").set_defaults(fn=cmd_blocks)

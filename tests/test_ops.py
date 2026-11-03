@@ -152,3 +152,82 @@ def test_exit_code_for_bad_config_prevents_restart_loop(tmp_path, monkeypatch):
     from duo_tracker.cli import EXIT_NO_RESTART, main
     monkeypatch.setattr(checkout, "STATE_DIR", tmp_path / "state")
     assert main(["-c", str(tmp_path / "missing.yaml"), "watch"]) == EXIT_NO_RESTART == 3
+
+
+def test_ping_reports_whether_it_actually_pinged():
+    clock = Clock()
+    h, _, pings = make(clock, healthcheck_url="https://hc.example/abc")
+    assert h.ping(force=True) is True
+    assert pings == ["https://hc.example/abc"]
+    assert h.ping() is False, "throttled within 60s"
+    assert h.ping(fail=True) is True
+    assert pings[-1] == "https://hc.example/abc/fail"
+
+
+def test_ping_reports_failure_and_never_raises():
+    clock = Clock()
+
+    def boom(url):
+        raise RuntimeError("network down")
+
+    h = Health(Notes(), clock=lambda: clock.t, now=lambda: clock.dt, http_get=boom,
+               healthcheck_url="https://hc.example/abc")
+    assert h.ping(force=True) is False  # reported, not raised
+
+
+def test_ping_without_url_is_false():
+    clock = Clock()
+    h, _, pings = make(clock)
+    assert h.ping(force=True) is False
+    assert pings == []
+
+
+def test_notify_test_warns_when_dead_man_switch_is_unset(tmp_path, monkeypatch, capsys):
+    import types
+
+    from duo_tracker import cli
+
+    cfgp = tmp_path / "c.yaml"
+    cfgp.write_text("models: [256gb-nightsky]\nntfy: {topic: t}\n")
+    monkeypatch.setattr(cli.Notifier, "send", lambda self, *a, **k: True)
+
+    assert cli.cmd_notify_test(types.SimpleNamespace(config=str(cfgp))) == 0
+    out = capsys.readouterr().out
+    assert "ntfy:        sent" in out
+    assert "healthcheck: not set" in out
+
+
+def test_notify_test_pings_the_healthcheck_when_set(tmp_path, monkeypatch, capsys):
+    import types
+
+    from duo_tracker import cli, health
+
+    cfgp = tmp_path / "c.yaml"
+    cfgp.write_text("models: [256gb-nightsky]\nntfy: {topic: t}\n"
+                    "health: {healthcheck_url: 'https://hc.example/abc'}\n")
+    monkeypatch.setattr(cli.Notifier, "send", lambda self, *a, **k: True)
+    got = []
+    monkeypatch.setattr(health.requests, "get", lambda url, timeout=5: got.append(url))
+
+    assert cli.cmd_notify_test(types.SimpleNamespace(config=str(cfgp))) == 0
+    assert got == ["https://hc.example/abc"]
+    assert "healthcheck: pinged" in capsys.readouterr().out
+
+
+def test_notify_test_fails_when_the_healthcheck_is_unreachable(tmp_path, monkeypatch, capsys):
+    import types
+
+    from duo_tracker import cli, health
+
+    cfgp = tmp_path / "c.yaml"
+    cfgp.write_text("models: [256gb-nightsky]\nntfy: {topic: t}\n"
+                    "health: {healthcheck_url: 'https://hc.example/abc'}\n")
+    monkeypatch.setattr(cli.Notifier, "send", lambda self, *a, **k: True)
+
+    def boom(url, timeout=5):
+        raise RuntimeError("no route to host")
+
+    monkeypatch.setattr(health.requests, "get", boom)
+
+    assert cli.cmd_notify_test(types.SimpleNamespace(config=str(cfgp))) == 1
+    assert "healthcheck: FAILED" in capsys.readouterr().out

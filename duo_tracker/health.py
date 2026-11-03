@@ -82,14 +82,21 @@ class Health:
                 urgent=False, tags="calendar")
             self.checks = self.drops = self.blocks = 0
 
-    def ping(self, fail: bool = False, force: bool = False) -> None:
+    def ping(self, fail: bool = False, force: bool = False) -> bool:
+        """Ping the dead-man switch. True only if a ping actually went out.
+
+        False means no URL configured, throttled, or the request failed --
+        `notify-test` uses force=True so it only ever means "it failed".
+        """
         if not self.hc_url:
-            return
+            return False
         t = self.clock()
         if not (fail or force) and t - self.last_ping < 60:
-            return
+            return False
         self.last_ping = t
         try:
             self.http_get(self.hc_url + ("/fail" if fail else ""))
+            return True
         except Exception as e:  # never let monitoring break watching
             log.warning("healthcheck ping failed: %s", e)
+            return False

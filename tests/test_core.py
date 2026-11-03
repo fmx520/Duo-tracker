@@ -71,7 +71,7 @@ def test_config_ok(tmp_path):
     assert [m.part for m in cfg.models] == ["MK1F4LL/A", "MK1J4LL/A"]
     assert cfg.carrier == "VERIZON_IPHONEDUO"
     assert cfg.store_filter == ["fifth avenue"]
-    assert cfg.interval_seconds == 30 and cfg.checkout_mode == "checkout"
+    assert cfg.interval_seconds == 30 and cfg.checkout_mode == "review"  # legacy name maps to review
 
 
 @pytest.mark.parametrize("body,msg", [
@@ -79,6 +79,7 @@ def test_config_ok(tmp_path):
     ("models: [256gb-nightsky]\ninterval_seconds: 5", ">= 30"),
     ("models: [256gb-nightsky]\ncarrier: sprint", "carrier"),
     ("models: [256gb-nightsky]\ncheckout: {mode: buy}", "checkout.mode"),
+    ("models: [256gb-nightsky]\ncheckout: {mode: purchase}", "checkout.mode"),
 ])
 def test_config_rejects(tmp_path, body, msg):
     with pytest.raises(ValueError, match=msg):
@@ -131,3 +132,11 @@ def test_hit_keys_only_new_drops_alert():
 def test_duplicate_models_collapse(tmp_path):
     cfg = load(write(tmp_path, "models: [256gb-nightsky, MK1F4LL/A]"))
     assert len(cfg.models) == 1 and cfg.interval_seconds == 30 and cfg.max_miles is None
+
+
+def test_price_cap(tmp_path):
+    cfg = load(write(tmp_path, "models: [256gb-nightsky, 2tb-starwhite]\ncheckout: {mode: submit}"))
+    assert cfg.checkout_mode == "submit"
+    assert cfg.cap_for(cfg.models[0]) == 2218.89 and cfg.cap_for(cfg.models[1]) == 3550.89
+    cfg = load(write(tmp_path, "models: [256gb-nightsky]\ncheckout: {mode: submit, max_total: 2200}"))
+    assert cfg.cap_for(cfg.models[0]) == 2200

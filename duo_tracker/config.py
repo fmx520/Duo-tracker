@@ -9,7 +9,8 @@ from .catalog import CARRIERS, Model, resolve
 
 MIN_INTERVAL_SECONDS = 30
 DEFAULT_PROFILE = Path.home() / ".duo-tracker" / "profile"
-CHECKOUT_MODES = ("alert", "bag", "checkout")
+CHECKOUT_MODES = ("alert", "bag", "review", "submit")
+DEFAULT_TAX_HEADROOM = 1.11  # highest US combined sales tax is ~10.25%
 
 
 @dataclass
@@ -26,6 +27,10 @@ class Config:
     blocked_backoff_seconds: int
     max_miles: float | None
     alert_on_courier: bool
+    max_total: float | None
+
+    def cap_for(self, model: Model) -> float:
+        return self.max_total if self.max_total is not None else round(model.price * DEFAULT_TAX_HEADROOM, 2)
 
 
 def load(path: str | Path) -> Config:
@@ -43,7 +48,9 @@ def load(path: str | Path) -> Config:
     if interval < MIN_INTERVAL_SECONDS:
         raise ValueError(f"config: interval_seconds must be >= {MIN_INTERVAL_SECONDS} (be polite to apple.com)")
 
-    mode = str((raw.get("checkout") or {}).get("mode", "bag")).lower()
+    checkout = raw.get("checkout") or {}
+    mode = str(checkout.get("mode", "bag")).lower()
+    mode = {"checkout": "review"}.get(mode, mode)
     if mode not in CHECKOUT_MODES:
         raise ValueError(f"config: checkout.mode must be one of {', '.join(CHECKOUT_MODES)}")
 
@@ -62,4 +69,5 @@ def load(path: str | Path) -> Config:
         blocked_backoff_seconds=max(300, int(raw.get("blocked_backoff_seconds", 600))),
         max_miles=float(raw["max_miles"]) if raw.get("max_miles") is not None else None,
         alert_on_courier=bool(raw.get("alert_on_courier", True)),
+        max_total=float(checkout["max_total"]) if checkout.get("max_total") is not None else None,
     )

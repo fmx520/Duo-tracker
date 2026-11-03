@@ -20,11 +20,16 @@ ntfy:
   topic: ""                # pick something long & unguessable, e.g. duo-7f3k9q2xw
 
 checkout:
-  # alert    – push notification only
-  # bag      – also add the in-stock model to your bag and open it (default)
-  # checkout – also click "Check Out"; you still choose the store and pay
-  # The bot never places the order.
+  # alert  – push notification only
+  # bag    – also add the in-stock model to your bag and open it (default)
+  # review – also fill in checkout (pickup at that store, saved card) and stop
+  #          on the review page; you click Place Order
+  # submit – full auto: places the order. Needs a passing `rehearse` in the
+  #          last 7 days, buys at most once (~/.duo-tracker/order.lock), and
+  #          stops on sign-in/2FA, security-code prompts, wrong model/store,
+  #          or a total over the cap.
   mode: bag
+  # max_total: 2250        # hard cap on the order total; default = model price × 1.11
 
 browser:
   channel: chrome          # uses your installed Google Chrome; "chromium" for Playwright's bundled one

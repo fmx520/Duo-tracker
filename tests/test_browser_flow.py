@@ -83,7 +83,7 @@ def page_factory():
         browser.close()
 
 
-def test_in_stock_then_bag_and_checkout(page_factory):
+def test_in_stock_then_bag(page_factory):
     page = page_factory()
     model = resolve("1tb-starwhite")
     av = check_model(page, model, "UNLOCKED/US")
@@ -93,16 +93,15 @@ def test_in_stock_then_bag_and_checkout(page_factory):
     req = next(u for u in page.seen if "fulfillment-messages" in u)
     assert "MK1J4LL/A" in req and "UNLOCKED" in req
 
-    status = go_to_bag(page, model, "UNLOCKED/US", "checkout")
-    assert page.url.endswith("/shop/checkout")
-    assert "opened checkout" in status
+    assert go_to_bag(page)
+    assert page.url.endswith("/shop/bag")
 
 
 def test_bag_mode_stops_at_bag(page_factory):
     page = page_factory()
     model = resolve("256gb-nightsky")
     check_model(page, model, "UNLOCKED/US")
-    assert go_to_bag(page, model, "UNLOCKED/US", "bag") == "Added to bag."
+    assert go_to_bag(page)
     assert page.url.endswith("/shop/bag")
 
 

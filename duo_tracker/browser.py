@@ -117,35 +117,18 @@ def check_round(page: Page, models: list[Model], carrier: str):
                 yield m, e
 
 
-def go_to_bag(page: Page, model: Model, carrier: str, mode: str) -> str:
-    """Add ``model`` to the bag and (optionally) open checkout. Returns a status line.
-
-    The page is already on the buy page with ``model`` selected from check_model.
-    Selectors past "Add to Bag" weren't verifiable from outside a real
-    signed-in session, so every step degrades to "you take it from here".
-    """
+def go_to_bag(page: Page) -> bool:
+    """Click Add to Bag on the buy page (``model`` already selected) and open the bag."""
     try:
         page.locator('[data-autom="add-to-cart"]').click(timeout=15_000)
         page.wait_for_load_state("domcontentloaded", timeout=30_000)
     except PWTimeout:
         page.bring_to_front()
-        return "Couldn't click Add to Bag — the buy page is open with your model selected."
-
+        return False
     if "/shop/bag" not in page.url:
         page.goto(BAG_URL, wait_until="domcontentloaded", timeout=60_000)
-    status = "Added to bag."
-
-    if mode == "checkout":
-        btn = page.locator('[data-autom="checkout"]').or_(page.get_by_role("button", name="Check Out"))
-        try:
-            btn.first.click(timeout=15_000)
-            page.wait_for_load_state("domcontentloaded", timeout=30_000)
-            status = "Added to bag and opened checkout — choose pickup at the store and pay."
-        except PWTimeout:
-            status = "Added to bag; couldn't find Check Out — tap it yourself."
     page.bring_to_front()
-    return status
-
+    return True
 
 
 def sleep_with_status(seconds: float) -> None:

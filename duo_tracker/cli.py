@@ -102,13 +102,25 @@ def cmd_watch(args) -> int:
     from playwright.sync_api import sync_playwright
 
     from .availability import hit_keys, matching_stores
-    from .browser import Blocked, check_round, go_to_bag, open_context, _page, sleep_with_status
+    from .browser import Blocked, check_round, open_context, _page, sleep_with_status
+    from .checkout import empty_bag, order_lock, rehearsal_ok
     from .config import load
 
     cfg = load(args.config)
     notifier = Notifier(cfg.ntfy_server, cfg.ntfy_topic)
     if not cfg.ntfy_topic:
         print("warning: no ntfy.topic set — alerts will only print here.")
+    if cfg.checkout_mode == "submit":
+        if (lock := order_lock()):
+            print(f"Refusing to auto-buy: this tool already placed an order ({lock.get('model')} at "
+                  f"{lock.get('store')}, {lock.get('at')}). Delete ~/.duo-tracker/order.lock to allow another.")
+            return 1
+        ok, why = rehearsal_ok()
+        if not ok:
+            print(f"Refusing to auto-buy: {why}.")
+            return 1
+        print(f"Auto-buy armed ({why}). Caps: " +
+              ", ".join(f"{m.key} ≤ ${cfg.cap_for(m):,.2f}" for m in cfg.models))
 
     print(f"Watching {', '.join(m.key for m in cfg.models)} every {cfg.interval_seconds}s "
           f"(checkout mode: {cfg.checkout_mode}). Ctrl-C to stop.")
@@ -120,6 +132,10 @@ def cmd_watch(args) -> int:
     with sync_playwright() as pw:
         ctx = open_context(pw, cfg)
         page = _page(ctx)
+        if cfg.checkout_mode in ("review", "submit"):
+            n = empty_bag(page)
+            if n:
+                print(f"Emptied {n} item(s) from your bag so checkout only contains the phone.")
         try:
             while True:
                 now: dict[str, str] = {}
@@ -150,14 +166,13 @@ def cmd_watch(args) -> int:
                             continue
 
                         notifier.send(f"🚨 {m.name} IN STOCK", f"{'; '.join(fresh[:4])}. ${m.price}", click=BUY_URL)
-                        if cfg.checkout_mode != "alert":
-                            status = go_to_bag(page, m, cfg.carrier, cfg.checkout_mode)
-                            notifier.send("Finish your iPhone Duo order NOW", status,
-                                          click="https://www.apple.com/shop/bag")
-                            print("\nStopped watching so you can finish checkout. "
-                                  "Browser stays open — press Ctrl-C when done.")
-                            while True:
-                                time.sleep(60)
+                        fresh_stores = [st for st in stores if f"pickup:{st.store_number}:{m.part}" not in live]
+                        if cfg.checkout_mode == "alert" or not fresh_stores:
+                            continue  # courier-only drops are alert-only
+                        _act_on_hit(page, cfg, notifier, m, fresh_stores)
+                        print("\nStopped watching. Browser stays open — press Ctrl-C when done.")
+                        while True:
+                            time.sleep(60)
                 except Blocked as e:
                     print(f"[{_ts()}] Apple blocked the request ({e}). Backing off {backoff // 60} min.")
                     notifier.send("Duo-tracker paused", f"Apple blocked checks ({e}). Retrying in {backoff // 60} min.",
@@ -180,6 +195,95 @@ def cmd_watch(args) -> int:
     return 0
 
 
+def _act_on_hit(page, cfg, notifier, model, stores) -> None:
+    """Bag the phone and, depending on mode, drive checkout to review or place the order."""
+    from .browser import go_to_bag
+    from .checkout import CheckoutStopped, Plan, run
+
+    bag_url = "https://www.apple.com/shop/bag"
+    if not go_to_bag(page):
+        notifier.send("Add to Bag failed — buy it NOW", f"{model.name}: the buy page is open with it selected.",
+                      click=BUY_URL)
+        return
+    if cfg.checkout_mode == "bag":
+        notifier.send("Finish your iPhone Duo order NOW", "It's in your bag — check out and pick up.", click=bag_url)
+        return
+
+    store = min(stores, key=lambda st: st.miles if st.miles is not None else 1e9)
+    plan = Plan(model=model, fulfillment="pickup", store_number=store.store_number, store_name=store.store_name,
+                max_total=cfg.cap_for(model), submit=cfg.checkout_mode == "submit")
+    t0 = time.monotonic()
+    try:
+        res = run(page, plan)
+    except CheckoutStopped as e:
+        page.bring_to_front()
+        print(f"[{_ts()}] checkout stopped at {e.step}: {e.reason}" + (f"\n           report: {e.report}" if e.report else ""))
+        notifier.send("⚠️ Checkout needs you NOW", f"{e.reason}. Window is open at that step.", click=bag_url)
+        return
+    took = time.monotonic() - t0
+    if res.placed:
+        conf = f" Order {res.confirmation}." if res.confirmation else " (confirmation page not detected — check email)"
+        msg = f"{model.name}, pickup at {res.store}, total ${res.total:,.2f}.{conf} ({took:.0f}s)"
+        print(f"[{_ts()}] ✅ ORDER PLACED: {msg}")
+        notifier.send("✅ iPhone Duo ORDER PLACED", msg, click="https://www.apple.com/shop/account/home")
+    else:
+        msg = f"{model.name} at {res.store}, total ${res.total:,.2f}. Tap Place Order. ({took:.0f}s)"
+        notifier.send("Review page ready — PLACE ORDER NOW", msg, click=bag_url)
+
+
+def cmd_rehearse(args) -> int:
+    """Walk the full checkout without placing anything; arms `submit` mode on success."""
+    from playwright.sync_api import sync_playwright
+
+    from .browser import go_to_bag, load_buy_page, open_context, select_config, _page
+    from .checkout import CheckoutStopped, Plan, empty_bag, record_rehearsal, run
+    from .config import load
+
+    cfg = load(args.config)
+    model = cfg.models[0]
+    results = []
+    with sync_playwright() as pw:
+        ctx = open_context(pw, cfg)
+        page = _page(ctx)
+        try:
+            empty_bag(page)
+            print(f"1/2 delivery rehearsal with {model.name} (stops on the review page, never orders)…")
+            load_buy_page(page)
+            select_config(page, model, cfg.carrier)
+            if not go_to_bag(page):
+                raise CheckoutStopped("buy page", "couldn't click Add to Bag")
+            r = run(page, Plan(model=model, fulfillment="delivery", max_total=cfg.cap_for(model)))
+            results.append(f"delivery ok, review total ${r.total:,.2f}")
+            print(f"    ✔ reached review — total ${r.total:,.2f} (cap ${cfg.cap_for(model):,.2f})")
+
+            if args.pickup_item_url:
+                print("2/2 pickup rehearsal with the accessory you gave (stops on review)…")
+                empty_bag(page)
+                page.goto(args.pickup_item_url, wait_until="domcontentloaded", timeout=60_000)
+                if not go_to_bag(page):
+                    raise CheckoutStopped("accessory page", "couldn't click Add to Bag")
+                r = run(page, Plan(model=model, fulfillment="pickup", check_model_name=False))
+                results.append(f"pickup ok at {r.store or 'first store'}")
+                print(f"    ✔ pickup flow reached review at {r.store or 'the first store'} — total ${r.total:,.2f}")
+            else:
+                print("2/2 skipped pickup rehearsal (pass --pickup-item-url with any in-stock accessory to test it)")
+        except CheckoutStopped as e:
+            record_rehearsal(False, str(e))
+            print(f"    ✘ stopped at {e.step}: {e.reason}")
+            if e.report:
+                print(f"      Send this file to fix the selectors: {e.report}")
+            return 2
+        finally:
+            try:
+                empty_bag(page)
+            except Exception:
+                pass
+            ctx.close()
+    record_rehearsal(True, "; ".join(results))
+    print("Rehearsal passed — `checkout.mode: submit` is armed for 7 days.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     p = argparse.ArgumentParser(prog="duo_tracker", description="Watch Apple for iPhone Duo pickup stock.")
@@ -189,7 +293,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("setup", help="sign in and choose a store in the bot's browser profile").set_defaults(fn=cmd_setup)
     sub.add_parser("notify-test", help="send a test push to your ntfy topic").set_defaults(fn=cmd_notify_test)
     sub.add_parser("check", help="check each model once and print results").set_defaults(fn=cmd_check)
-    sub.add_parser("watch", help="keep checking; alert + add to bag on stock").set_defaults(fn=cmd_watch)
+    sub.add_parser("watch", help="keep checking; act on stock per checkout.mode").set_defaults(fn=cmd_watch)
+    r = sub.add_parser("rehearse", help="walk checkout to the review page without ordering (arms submit mode)")
+    r.add_argument("--pickup-item-url", help="apple.com product page of any in-stock accessory, to test the pickup steps")
+    r.set_defaults(fn=cmd_rehearse)
     args = p.parse_args(argv)
     try:
         return args.fn(args)

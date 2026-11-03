@@ -158,3 +158,33 @@ def test_watch_loop_uses_schedule_and_logs_blocks(tmp_path, monkeypatch):
     assert waits == [30, 600, 90]
     log = (tmp_path / "state" / "blocks.csv").read_text()
     assert "HTTP 541,30,peak 07:30–09:30" in log
+
+
+def test_stale_rehearsal_downgrades_to_review_instead_of_exiting(tmp_path, monkeypatch):
+    pytest.importorskip("playwright")
+    import types
+
+    from duo_tracker import browser, checkout, cli
+
+    monkeypatch.setattr(checkout, "STATE_DIR", tmp_path / "state")  # no rehearsal on file
+    cfgp = tmp_path / "c.yaml"
+    cfgp.write_text("models: [256gb-nightsky]\ncheckout: {mode: submit}\nhealth: {daily_summary_hour: null}\n")
+    seen = {}
+
+    def fake_open(pw, cfg):
+        seen["mode"] = cfg.checkout_mode
+        raise KeyboardInterrupt  # stop right after startup
+
+    monkeypatch.setattr(browser, "open_context", fake_open)
+    sent = []
+    monkeypatch.setattr(cli.Notifier, "send", lambda self, title, *a, **k: sent.append(title) or True)
+
+    class PW:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    import playwright.sync_api as sapi
+    monkeypatch.setattr(sapi, "sync_playwright", lambda: PW())
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.cmd_watch(types.SimpleNamespace(config=str(cfgp)))
+    assert seen["mode"] == "review" and "Auto-buy not armed" in sent

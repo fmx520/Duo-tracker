@@ -242,12 +242,15 @@ def cmd_watch(args) -> int:
                   f"{lock.get('store')}, {lock.get('at')}). Delete ~/.duo-tracker/order.lock to allow another.")
             return EXIT_NO_RESTART
         ok, why = rehearsal_ok()
-        if not ok:
-            print(f"Refusing to auto-buy: {why}.")
-            notifier.send("Duo-tracker not armed", f"Auto-buy refused: {why}.", urgent=False, tags="warning")
-            return EXIT_NO_RESTART
-        print(f"Auto-buy armed ({why}). Caps: " +
-              ", ".join(f"{m.key} ≤ ${cfg.cap_for(m):,.2f}" for m in cfg.models))
+        if ok:
+            print(f"Auto-buy armed ({why}). Caps: " +
+                  ", ".join(f"{m.key} ≤ ${cfg.cap_for(m):,.2f}" for m in cfg.models))
+        else:
+            # Keep watching rather than stopping: fill checkout and let you tap Place Order.
+            cfg.checkout_mode = "review"
+            print(f"Auto-buy NOT armed ({why}). Watching in review mode: it fills checkout, you tap Place Order.")
+            notifier.send("Auto-buy not armed", f"{why}. Still watching. On a drop it fills checkout and "
+                          "you tap Place Order. Run `./duo rehearse` to re-arm.", urgent=False, tags="warning")
 
     peaks = ", ".join(f"{w.label} every {w.seconds}s" for w in cfg.schedule_windows)
     print(f"Watching {', '.join(m.key for m in cfg.models)}: every {cfg.schedule_default}s"

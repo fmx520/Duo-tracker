@@ -146,7 +146,8 @@ On top of that:
 - **One order, ever.** Right before clicking Place Order it writes
   `~/.duo-tracker/order.lock`. While that file exists it refuses to buy again,
   even after a crash. Delete the file to allow another order.
-- **It won't arm without a recent passing `rehearse`** (within 7 days).
+- **It won't arm without a recent passing `rehearse`** (within 7 days). Without one it
+  keeps watching in `review` mode (fills checkout, you tap Place Order) and tells you to re-run it.
 - **It empties your bag when `watch` starts**, so checkout contains only the phone.
 - **It picks the nearest in-stock store** that passes your `stores`/`max_miles`
   filters. Courier-only drops get an alert but aren't auto-bought.

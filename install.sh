@@ -5,7 +5,14 @@ cd "$(dirname "$0")"
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
+if [ "$(uname -s)" = Linux ]; then
+  say "Installing system packages: Python venv support, virtual screen, VNC (needs sudo)…"
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq python3 python3-venv python3-pip xvfb x11vnc
+fi
+
 command -v python3 >/dev/null || { echo "python3 not found — install Python 3.10+ first."; exit 1; }
+python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' || { echo "Python 3.10+ needed (Ubuntu 22.04 or newer)."; exit 1; }
 
 say "Creating virtualenv (.venv) and installing Python packages…"
 python3 -m venv .venv
@@ -14,9 +21,6 @@ python3 -m venv .venv
 
 case "$(uname -s)" in
   Linux)
-    say "Installing the virtual screen + VNC server (needs sudo)…"
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq xvfb x11vnc
     say "Installing Google Chrome for the bot (falls back to Chromium)…"
     .venv/bin/playwright install --with-deps chrome || .venv/bin/playwright install --with-deps chromium
     ;;

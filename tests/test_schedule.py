@@ -127,7 +127,7 @@ def test_watch_loop_uses_schedule_and_logs_blocks(tmp_path, monkeypatch):
 
     rounds = iter(["ok", "blocked", "ok"])
 
-    def fake_round(page, models, carrier):
+    def fake_round(page, models, carrier, **kwargs):
         r = next(rounds)
         if r == "blocked":
             raise browser.Blocked("HTTP 541")
@@ -201,7 +201,7 @@ def test_check_logs_blocks_so_duo_blocks_sees_them(tmp_path, monkeypatch):
     cfgp = tmp_path / "c.yaml"
     cfgp.write_text("models: [256gb-nightsky]\ncheckout: {mode: alert}\nhealth: {daily_summary_hour: null}\n")
 
-    def fake_round(page, models, carrier):
+    def fake_round(page, models, carrier, **kwargs):
         raise browser.Blocked("HTTP 541")
         yield  # pragma: no cover - makes this a generator, like the real check_round
 

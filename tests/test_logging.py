@@ -93,7 +93,7 @@ def test_watch_records_drop_start_outcome_and_end(state, tmp_path, monkeypatch):
     ww = lambda avail: StoreStock("Walt Whitman", "R068", "Huntington Station", "9.2 mi", 9.2, avail, "Today")  # noqa: E731
     rounds = iter([False, True, True, False])
 
-    def fake_round(page, models, carrier):
+    def fake_round(page, models, carrier, **kwargs):
         yield models[0], Availability(part=models[0].part, stores=[ww(next(rounds))], has_pickup_data=True)
 
     sleeps = []

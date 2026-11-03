@@ -51,7 +51,9 @@ def _plain(text: str) -> str:
 def _first_str(*vals) -> str:
     for v in vals:
         if isinstance(v, str) and v.strip():
-            return _plain(v)
+            plain = _plain(v)
+            if plain:  # markup-only value: fall through to the next candidate
+                return plain
     return ""
 
 

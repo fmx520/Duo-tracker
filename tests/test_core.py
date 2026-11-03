@@ -140,3 +140,31 @@ def test_price_cap(tmp_path):
     assert cfg.cap_for(cfg.models[0]) == 2218.89 and cfg.cap_for(cfg.models[1]) == 3550.89
     cfg = load(write(tmp_path, "models: [256gb-nightsky]\ncheckout: {mode: submit, max_total: 2200}"))
     assert cfg.cap_for(cfg.models[0]) == 2200
+
+
+def test_quote_strings_are_stripped_of_markup():
+    """Apple sends markup in its quote fields; these strings go to push alerts."""
+    p = payload([("Walt Whitman", "Huntington Station", "available")])
+    store = p["body"]["content"]["pickupMessage"]["stores"][0]
+    store["partsAvailability"][PART]["pickupSearchQuote"] = (
+        'Available <span class="bold">Today</span>')
+    store["storedistanceWithUnit"] = "9.2&nbsp;mi"
+    p["body"]["content"]["deliveryMessage"][PART]["regular"]["stickyMessageSTH"] = (
+        'Ships <span class="bold">Mon, Jan 25</span>')
+    p["body"]["content"]["deliveryMessage"][PART]["regular"]["stickyMessageIDL"] = (
+        'Get it by <b>Tue,&nbsp;Nov 4</b>')
+
+    av = parse(p, PART)
+
+    assert av.delivery_quote == "Ships Mon, Jan 25"
+    assert av.courier_quote == "Get it by Tue, Nov 4"
+    assert av.in_stock_stores[0].quote == "Available Today"
+    # entity-encoded nbsp must not break distance parsing
+    assert av.stores[0].miles == pytest.approx(9.2)
+
+
+def test_markup_only_value_falls_through_to_next_candidate():
+    p = payload([("SoHo", "New York", "available")])
+    regular = p["body"]["content"]["deliveryMessage"][PART]["regular"]
+    regular["stickyMessageSTH"] = "<span></span>"
+    assert parse(p, PART).delivery_quote == "Delivers Jan 25 – Feb 1"

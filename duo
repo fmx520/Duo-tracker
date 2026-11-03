@@ -30,6 +30,7 @@ case "$cmd" in
 ./duo watch       run in this terminal (polls, or listens in trigger mode)
 ./duo trigger-init  private trigger topic + signing secret → config.yaml
 ./duo trigger-send  publish one signed trigger (testing; --yes to send)
+./duo trigger-env [DIR]  copy trigger settings into an apple-stock detector's .env
 ./duo blocks      when Apple blocked checks (to tune the schedule)
 ./duo drops       every drop seen and what the bot did (--csv FILE to export)
 ./duo logs        follow the log file (full error details are in it)

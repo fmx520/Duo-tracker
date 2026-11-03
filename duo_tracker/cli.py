@@ -718,6 +718,57 @@ def cmd_trigger_init(args) -> int:
     return 0
 
 
+# Detector settings for kelindi/apple-stock matching this config (pickup near
+# the configured ZIP, watched parts only). Polling interval stays at its floor.
+def _detector_env(cfg) -> dict[str, str]:
+    km = round((cfg.max_miles or 30) * 1.609344)
+    return {
+        "COUNTRY": "us",
+        "PRODUCT": "iphone-duo",
+        "POSTAL_CODE": cfg.zip or "",
+        "MODELS": ",".join(m.part for m in cfg.models),
+        "MAX_DISTANCE_KM": str(km),
+        "INTERVAL_SECONDS": "30",
+        "DUO_TRIGGER_SERVER": cfg.trigger_server,
+        "DUO_TRIGGER_TOPIC": cfg.trigger_topic,
+        "DUO_TRIGGER_SECRET": cfg.trigger_secret,
+        "DUO_TRIGGER_TOKEN": cfg.trigger_token,
+    }
+
+
+def cmd_trigger_env(args) -> int:
+    """Write the trigger topic/secret (and matching search settings) into a detector's .env."""
+    import re
+    from pathlib import Path
+
+    from .config import load
+
+    cfg = load(args.config)
+    if not (cfg.trigger_topic and cfg.trigger_secret):
+        print("No trigger topic/secret in config. Run `./duo trigger-init` first.")
+        return 1
+    root = Path(args.detector_dir).expanduser()
+    env_path = root / ".env"
+    if env_path.exists():
+        text = env_path.read_text()
+    elif (root / ".env.example").exists():
+        text = (root / ".env.example").read_text()
+    else:
+        print(f"{root} doesn't look like an apple-stock checkout (no .env or .env.example).")
+        return 1
+    for key, value in _detector_env(cfg).items():
+        line = f"{key}={value}"
+        if re.search(rf"(?m)^{key}=.*$", text):
+            text = re.sub(rf"(?m)^{key}=.*$", lambda _m: line, text)
+        else:
+            text = text.rstrip("\n") + "\n" + line + "\n"
+    env_path.write_text(text)
+    env_path.chmod(0o600)
+    print(f"Wrote trigger settings to {env_path} (private to you; secret not shown).")
+    print("Don't run the detector alongside `submit` polling: same IP, double the Apple traffic.")
+    return 0
+
+
 def cmd_trigger_send(args) -> int:
     """Publish one signed trigger — to test the listener end to end, or as a manual detector."""
     from datetime import datetime, timedelta, timezone
@@ -862,6 +913,9 @@ def main(argv: list[str] | None = None) -> int:
     ti = sub.add_parser("trigger-init", help="create a private trigger topic + signing secret in config.yaml")
     ti.add_argument("--rotate", action="store_true", help="replace an existing topic and secret")
     ti.set_defaults(fn=cmd_trigger_init)
+    te = sub.add_parser("trigger-env", help="write trigger topic/secret into a kelindi apple-stock .env")
+    te.add_argument("detector_dir", nargs="?", default="~/src/apple-stock")
+    te.set_defaults(fn=cmd_trigger_env)
     ts = sub.add_parser("trigger-send", help="publish one signed trigger (testing / manual detector)")
     ts.add_argument("--store", required=True, help="store number, e.g. R068")
     ts.add_argument("--model", help="model key (default: first in config)")

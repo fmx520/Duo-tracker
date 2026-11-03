@@ -425,3 +425,17 @@ def test_fatal_source_alone_exits_no_restart(tmp_path, monkeypatch):
         yield  # pragma: no cover
     assert cli._watch_triggers(h.cfg, listen_fn=listen) == cli.EXIT_NO_RESTART
     assert any("stopped" in t for t in h.sent)
+
+
+def test_trigger_env_writes_detector_settings_privately(tmp_path):
+    det = tmp_path / "apple-stock"
+    det.mkdir()
+    (det / ".env.example").write_text("POSTAL_CODE=M5V3L9\nCOUNTRY=ca\nNTFY_TOPIC=\nDUO_TRIGGER_TOPIC=\nDUO_TRIGGER_SECRET=\n")
+    p = tmp_path / "c.yaml"
+    p.write_text(cfg_text() + 'zip: "11754"\nmax_miles: 30\n')
+    assert cli.cmd_trigger_env(types.SimpleNamespace(config=str(p), detector_dir=str(det))) == 0
+    env = dict(line.split("=", 1) for line in (det / ".env").read_text().splitlines() if "=" in line)
+    assert env["COUNTRY"] == "us" and env["POSTAL_CODE"] == "11754" and env["MODELS"] == PART
+    assert env["MAX_DISTANCE_KM"] == "48" and env["DUO_TRIGGER_SECRET"] == SECRET
+    assert env["DUO_TRIGGER_TOPIC"] == "duo-trigger-abc" and env["NTFY_TOPIC"] == ""
+    assert oct((det / ".env").stat().st_mode)[-3:] == "600"

@@ -235,9 +235,19 @@ Everything after that is the normal checkout with all its stops.
 ./duo trigger-send --store R068 --bad-sig --yes   # should be rejected, nothing bought
 ```
 
-The detector itself is not part of this repo; it must sign payloads as
-described in [TRIGGER_MODE.md](TRIGGER_MODE.md). Measure its lag before
-relying on it — drops near 11754 last ~30-75s.
+Detectors (`trigger.sources`, any combination):
+
+- `radar`: polls the public NYC pickup radar (duo-tracker-six.vercel.app) every
+  ~5s. No Apple traffic from your IP. Covers Manhasset, Roosevelt Field and
+  Walt Whitman; **not Smith Haven**.
+- `ntfy`: signed triggers from a patched
+  [kelindi/apple-stock](https://github.com/kelindi/apple-stock) (`src/trigger.js`).
+  `./duo trigger-env ~/src/apple-stock` writes its `.env`. It polls Apple from
+  wherever it runs, so it replaces this bot's polling; never run both.
+
+Drops near 11754 last ~10-80s (radar median ~20s), so detector lag decides
+whether trigger mode wins. Polling `submit` mode stays available as the
+fallback.
 
 ## Config
 

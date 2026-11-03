@@ -208,6 +208,7 @@ def cmd_check(args) -> int:
 
     from .availability import matching_stores
     from .browser import Blocked, check_round, open_context, _page
+    from .checkout import STATE_DIR
     from .config import load
 
     cfg = load(args.config)
@@ -221,6 +222,8 @@ def cmd_check(args) -> int:
                 else:
                     _report(m, res, matching_stores(res, cfg.store_filter, cfg.max_miles))
         except Blocked as e:
+            # Log it the way cmd_watch does, so `./duo blocks` sees one-off checks too.
+            cfg.make_schedule(STATE_DIR / "blocks.csv").on_block(str(e))
             say(f"Apple blocked the availability request ({e}). Try again later.")
             return 2
         finally:

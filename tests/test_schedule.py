@@ -188,3 +188,32 @@ def test_stale_rehearsal_downgrades_to_review_instead_of_exiting(tmp_path, monke
     with pytest.raises(KeyboardInterrupt):
         cli.cmd_watch(types.SimpleNamespace(config=str(cfgp)))
     assert seen["mode"] == "review" and "Auto-buy not armed" in sent
+
+
+def test_check_logs_blocks_so_duo_blocks_sees_them(tmp_path, monkeypatch):
+    """A 541 during `./duo check` must land in blocks.csv, not just on stdout."""
+    pytest.importorskip("playwright")
+    import types
+
+    from duo_tracker import browser, checkout, cli
+
+    monkeypatch.setattr(checkout, "STATE_DIR", tmp_path / "state")
+    cfgp = tmp_path / "c.yaml"
+    cfgp.write_text("models: [256gb-nightsky]\ncheckout: {mode: alert}\nhealth: {daily_summary_hour: null}\n")
+
+    def fake_round(page, models, carrier):
+        raise browser.Blocked("HTTP 541")
+        yield  # pragma: no cover - makes this a generator, like the real check_round
+
+    ctx = types.SimpleNamespace(pages=[object()], close=lambda: None)
+    monkeypatch.setattr(browser, "open_context", lambda pw, cfg: ctx)
+    monkeypatch.setattr(browser, "check_round", fake_round)
+
+    class PW:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    import playwright.sync_api as sapi
+    monkeypatch.setattr(sapi, "sync_playwright", lambda: PW())
+
+    assert cli.cmd_check(types.SimpleNamespace(config=str(cfgp))) == 2
+    assert "HTTP 541" in (tmp_path / "state" / "blocks.csv").read_text()

@@ -58,8 +58,11 @@ class FakeApple:
                 self.items += [q["added"]] * (1 + self.extra_qty)
             if "remove" in q and self.items:
                 self.items.pop(0)
-            rows = "".join(f"<div>{NAMES[p]} <button data-autom='bag-item-remove-button'"
-                           f" onclick=\"location.href='/shop/bag?remove=1'\">Remove</button></div>" for p in self.items)
+            rows = "".join(
+                f"<div data-autom='bag-item-{i}'>{NAMES[p]} "
+                f"<button data-autom='bag-item-remove-button'"
+                f" onclick=\"location.href='/shop/bag?remove=1'\">Remove</button></div>"
+                for i, p in enumerate(self.items))
             return html("Bag", f"<h1>Your bag</h1>{rows}<a href='/shop/accessories'>Continue Shopping</a>"
                                "<button data-autom='checkout' onclick=\"location.href='/shop/checkout?_s=Fulfillment'\">Check Out</button>")
         if path == "/signin":
@@ -189,10 +192,31 @@ def test_total_over_cap_stops(browser):
     assert fake.orders == []
 
 
-def test_two_phones_in_bag_trips_the_cap(browser):
+def test_two_phones_in_bag_stops_before_checkout(browser):
+    # The bag gate now catches duplicates BEFORE the review page / total cap.
     fake = FakeApple(extra_qty=1)
-    with pytest.raises(CheckoutStopped, match="over the"):
+    with pytest.raises(CheckoutStopped, match="expected exactly 1"):
         run(open_page(browser, fake), pickup_plan())
+    assert fake.orders == []
+
+
+def test_quantity_two_on_one_line_stops(browser, state_dir):
+    # One line item but quantity=2: still not "exactly one phone".
+    from duo_tracker.checkout import _bag_item_quantities
+    fake = FakeApple()
+    page = open_page(browser, fake)
+    assert _bag_item_quantities(page) == [1]
+    # Simulate Apple rendering the single line with qty 2 via a select.
+    page.evaluate("""() => {
+        const item = document.querySelector('[data-autom^="bag-item"]');
+        const s = document.createElement('select');
+        for (const v of ['1','2','3']) { const o = document.createElement('option'); o.value = v; o.text = v; s.appendChild(o); }
+        s.value = '2';
+        item.appendChild(s);
+    }""")
+    assert _bag_item_quantities(page) == [2]
+    with pytest.raises(CheckoutStopped, match="expected exactly 1"):
+        run(page, pickup_plan())
     assert fake.orders == []
 
 
@@ -312,7 +336,8 @@ def test_checkout_reports_step_timings(browser):
     from duo_tracker.checkout import format_timings
     res = run(open_page(browser, FakeApple()), pickup_plan())
     steps = [s for s, _ in res.timings]
-    assert steps[0] == "check out" and "fulfillment" in steps and "review verified" in steps
+    assert steps[0] == "bag verified" and "check out" in steps and "fulfillment" in steps
+    assert "review verified" in steps
     assert steps[-1] == "order confirmed"
     assert all(b >= a for (_, a), (_, b) in zip(res.timings, res.timings[1:]))
     assert "total" in format_timings(res.timings)
@@ -321,7 +346,7 @@ def test_checkout_reports_step_timings(browser):
 def test_stopped_checkout_carries_timings(browser):
     with pytest.raises(CheckoutStopped) as ei:
         run(open_page(browser, FakeApple(cvv=True)), pickup_plan())
-    assert [s for s, _ in ei.value.timings][:2] == ["check out", "fulfillment"]
+    assert [s for s, _ in ei.value.timings][:2] == ["bag verified", "check out"]
 
 
 def _account_route(signed_in):

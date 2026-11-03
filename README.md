@@ -217,6 +217,13 @@ rest of that window drops back to the slow rate. Every block is logged.
 check-in includes a block count. After a week, tune `schedule:` to what your
 connection actually tolerates.
 
+## Planned work
+
+[TRIGGER_MODE.md](TRIGGER_MODE.md) specs a `trigger` checkout mode: an
+external detector publishes a signed "a Duo dropped" message, the bot
+confirms it and buys, instead of polling Apple all day. Proposed, not
+built.
+
 ## Config
 
 See [`config.example.yaml`](config.example.yaml). The settings most people change:

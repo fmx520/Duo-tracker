@@ -13,6 +13,10 @@ only read one other file, make it `HANDOFF.md`.
    and what is genuinely still unknown. **Do not re-derive it.**
 2. [README.md](README.md) — what the tool does and how to run it.
 3. [CLAUDE.md](CLAUDE.md) — the reasoning behind the design decisions.
+4. [TRIGGER_MODE.md](TRIGGER_MODE.md) — design spec for work that is
+   **proposed but not built**: an external detector triggering the bot
+   instead of the bot polling. Read it before starting that feature; it
+   carries non-optional security requirements.
 
 ## Hard rules — do not work around these
 

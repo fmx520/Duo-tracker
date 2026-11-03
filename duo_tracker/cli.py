@@ -500,7 +500,7 @@ def _hold_after_acting(health) -> None:
         health.ping()
 
 
-def _watch_triggers(cfg, listen_fn=None) -> int:
+def _watch_triggers(cfg, listen_fn=None, radar_fn=None) -> int:
     """Wait for signed triggers; on one, confirm with Apple and run the normal checkout."""
     import dataclasses
 
@@ -544,23 +544,41 @@ def _watch_triggers(cfg, listen_fn=None) -> int:
         n = empty_bag(page)
         if n:
             say(f"Emptied {n} item(s) from your bag so checkout only contains the phone.")
-        say(f"Trigger mode: listening on the trigger topic for {', '.join(m.key for m in cfg.models)}. "
+        say(f"Trigger mode ({' + '.join(cfg.trigger_sources)}) for {', '.join(m.key for m in cfg.models)}. "
             f"Confirmed drops → {action}. Ctrl-C to stop.")
         notifier.send("Duo-tracker started", f"Trigger mode on {socket.gethostname()} "
                       f"({', '.join(m.key for m in cfg.models)}; confirmed drops → {action}).",
                       urgent=False, tags="eyes")
+        sources = {}
+        if "ntfy" in cfg.trigger_sources:
+            listen = listen_fn or trig.listen
+            sources["ntfy"] = lambda: listen(cfg.trigger_server, cfg.trigger_topic, token=cfg.trigger_token,
+                                             backoff_s=cfg.trigger_reconnect_backoff_seconds)
+        if "radar" in cfg.trigger_sources:
+            radar = radar_fn or trig.radar
+            sources["radar"] = lambda: radar(cfg.radar_url, secret=cfg.trigger_secret,
+                                             parts={m.part for m in cfg.models}, store_allowed=cfg.store_allowed,
+                                             poll_s=cfg.radar_poll_seconds)
+        up: dict[str, bool] = {}
+        fatal: set[str] = set()
         try:
-            events = listen_fn(cfg.trigger_server, cfg.trigger_topic, token=cfg.trigger_token,
-                               backoff_s=cfg.trigger_reconnect_backoff_seconds)
-            for ev in events:
+            for src, ev in trig.merged(sources):
                 if ev.kind in ("connected", "keepalive"):
-                    if ev.kind == "connected":
-                        say("trigger listener connected")
+                    if not up.get(src):
+                        up[src] = True
+                        say(f"trigger source {src}: connected")
                     health.alive()
                     _trigger_signin_check(page, cfg, notifier, state, signed_in)
                 elif ev.kind == "disconnected":
-                    health.problem(f"trigger listener: {ev.text}")
-                    say(f"trigger listener disconnected ({ev.text}); reconnecting", logging.WARNING)
+                    health.problem(f"trigger source {src}: {ev.text}")
+                    if up.get(src, True):  # log transitions, not every failed poll
+                        say(f"trigger source {src} down ({ev.text}); retrying", logging.WARNING)
+                    up[src] = False
+                elif ev.kind == "fatal":
+                    up[src] = False
+                    say(f"trigger source {src} stopped: {ev.text}", logging.ERROR)
+                    notifier.send(f"Duo-tracker: trigger source {src} stopped", ev.text, urgent=False, tags="warning")
+                    fatal.add(src)
                 elif ev.kind == "message":
                     result = _handle_trigger(ev.text, page=page, cfg=cfg, act_cfg=act_cfg, notifier=notifier,
                                              health=health, nonces=nonces, drop_log=drop_log, state=state)
@@ -568,10 +586,9 @@ def _watch_triggers(cfg, listen_fn=None) -> int:
                         _hold_after_acting(health)
                         return 0
                 health.tick()
-        except PermissionError as e:
-            say(str(e), logging.ERROR)
-            notifier.send("Duo-tracker can't listen for triggers", str(e), urgent=False, tags="warning")
-            return EXIT_NO_RESTART
+            if fatal:  # every source is gone and at least one died: restarting won't fix a bad token
+                say("No trigger sources left running.", logging.ERROR)
+                return EXIT_NO_RESTART
         except KeyboardInterrupt:
             say("bye")
         finally:

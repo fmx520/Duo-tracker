@@ -11,6 +11,17 @@ Rejected-trigger pushes are rate-limited to one per 5 minutes so a flood
 can't bury real alerts. On reconnect the listener asks ntfy for messages
 `since` the last id, so a blip doesn't lose a trigger.
 
+**Detectors (built):** `trigger.sources` picks any of
+- `ntfy` — signed triggers from an external publisher. A patched
+  kelindi/apple-stock (`src/trigger.js`) publishes them; it polls Apple from
+  wherever it runs, so never run it next to `submit` polling on one IP.
+- `radar` — the public NYC pickup radar's `/api/state`, polled every ~5s. Its
+  entries are signed locally and go through the same validation, so its
+  `changed_at` is `seen_at`. It covers R068/R060/R327 but not R139.
+
+Radar history (Oct 30 – Nov 3): median drop life ~20s, p25 ~13s. That is the
+latency budget the whole chain has to fit in.
+
 ## What it is
 
 A fourth source of truth for "a Duo just dropped". Today the watcher finds

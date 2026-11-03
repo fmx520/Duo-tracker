@@ -67,3 +67,11 @@ trigger:
   action: submit           # confirmed trigger → submit (needs rehearsal) | review
   max_age_seconds: 90      # older triggers are rejected
   reconnect_backoff_seconds: 5
+  # Where triggers come from (any combination):
+  #   ntfy  – signed messages on `topic` (e.g. the kelindi/apple-stock detector)
+  #   radar – poll the public NYC pickup radar (duo-tracker-six.vercel.app,
+  #           ~5s sweeps of 29 stores incl. Manhasset/Roosevelt Field/Walt
+  #           Whitman; NOT Smith Haven). No Apple traffic from your IP.
+  sources: [ntfy]
+  # radar_url: https://duo-tracker-six.vercel.app
+  # radar_poll_seconds: 5   # min 3 — it's someone else's free service

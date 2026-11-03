@@ -305,3 +305,123 @@ def test_trigger_init_writes_private_section_and_rotates(tmp_path):
     assert cli.cmd_trigger_init(types.SimpleNamespace(config=str(p), rotate=True)) == 0
     second = load(p)
     assert second.trigger_secret != first.trigger_secret and second.trigger_topic != first.trigger_topic
+
+
+# ── cross-language signing vector (kelindi detector signs in JS) ──────────────
+VECTOR = {"v": 1, "part": "MK1H4LL/A", "store_number": "R327", "seen_at": "2026-11-03T12:40:48.247Z",
+          "nonce": "00112233445566778899aabbccddeeff"}
+VECTOR_SIG = "8d588eefa7a2ca77114f1e81be838591d473f7a89121df1b3ae3e6f8099b54d9"   # same constant in apple-stock test
+
+
+def test_signing_vector_matches_js_detector():
+    assert trig.sign(VECTOR, "k" * 64) == VECTOR_SIG
+    assert trig.canonical(VECTOR) == (b'{"nonce":"00112233445566778899aabbccddeeff","part":"MK1H4LL/A",'
+                                      b'"seen_at":"2026-11-03T12:40:48.247Z","store_number":"R327","v":1}')
+
+
+def test_js_style_utc_z_timestamps_validate(cfg, nonces):
+    seen = now().strftime("%Y-%m-%dT%H:%M:%S.") + "123Z"      # what Date.toISOString() emits
+    p = {"v": 1, "part": PART, "store_number": WW, "seen_at": seen, "nonce": "abc123"}
+    p["sig"] = trig.sign(p, SECRET)
+    assert check(p, cfg, nonces).store_number == WW
+
+
+# ── radar source ──────────────────────────────────────────────────────────────
+class RadarResp:
+    def __init__(self, data): self.data = data
+    def raise_for_status(self): pass
+    def json(self): return self.data
+
+
+def radar_state(stock, ok_age_s=2):
+    ok = (now() - timedelta(seconds=ok_age_s)).isoformat().replace("+00:00", "Z")
+    return {"stock": stock, "events": [], "status": {"last_ok_at": ok, "stores_seen": 29}}
+
+
+def iso_ago(s):
+    return (now() - timedelta(seconds=s)).isoformat().replace("+00:00", "Z")
+
+
+def run_radar(responses, n, **kw):
+    sleeps, it = [], iter(responses)
+
+    def http_get(url, **k):
+        r = next(it)
+        if isinstance(r, Exception):
+            raise r
+        return RadarResp(r)
+    gen = trig.radar("https://radar.example", secret=SECRET, parts={PART}, store_allowed=lambda s: s in {"R068", "R327"},
+                     poll_s=5, http_get=http_get, sleep=sleeps.append, **kw)
+    return [next(gen) for _ in range(n)], sleeps
+
+
+def test_radar_emits_signed_trigger_for_new_watched_hit(cfg, nonces):
+    hit = {"store_id": "R327", "part_number": PART, "changed_at": iso_ago(3)}
+    other_part = {"store_id": "R327", "part_number": "MK1F4LL/A", "changed_at": iso_ago(3)}
+    other_store = {"store_id": "R095", "part_number": PART, "changed_at": iso_ago(3)}
+    evs, _ = run_radar([radar_state([hit, other_part, other_store]), radar_state([hit])], 3)
+    assert [e.kind for e in evs] == ["keepalive", "message", "keepalive"]   # 2nd poll: same hit, not re-sent
+    t = check(evs[1].text, cfg, nonces)
+    assert (t.part, t.store_number) == (PART, "R327") and 2 <= t.age() <= 10   # age measured from radar's changed_at
+
+
+def test_radar_stale_or_down_reports_disconnected_and_backs_off():
+    evs, sleeps = run_radar([radar_state([], ok_age_s=300), ConnectionError("dns"), radar_state([])], 3)
+    assert [e.kind for e in evs] == ["disconnected", "disconnected", "keepalive"]
+    assert "stale" in evs[0].text and "unreachable" in evs[1].text
+    assert 8.5 <= sleeps[1] <= 11.5        # doubled (±15% jitter) after a failure
+
+
+def test_radar_old_hit_is_rejected_as_expired(cfg, nonces):
+    evs, _ = run_radar([radar_state([{"store_id": "R068", "part_number": PART, "changed_at": iso_ago(400)}])], 2)
+    with pytest.raises(trig.TriggerRejected, match="expired"):
+        check(evs[1].text, cfg, nonces)
+
+
+def test_merged_reports_fatal_and_ends():
+    def good():
+        yield trig.Event("keepalive")
+
+    def bad():
+        raise PermissionError("HTTP 403")
+        yield  # pragma: no cover
+
+    out = list(trig.merged({"a": good, "b": bad}))
+    kinds = {(s, e.kind) for s, e in out}
+    assert ("a", "keepalive") in kinds and ("a", "ended") in kinds and ("b", "fatal") in kinds
+
+
+def test_radar_only_config_needs_no_topic(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(cfg_text(topic="").replace("action: submit}", "action: submit, sources: [radar]}"))
+    c = load(p)
+    assert c.trigger_sources == ("radar",)
+    p.write_text(cfg_text().replace("action: submit}", "action: submit, sources: [radar], radar_poll_seconds: 1}"))
+    with pytest.raises(ValueError, match="radar_poll_seconds"):
+        load(p)
+    p.write_text(cfg_text().replace("action: submit}", "action: submit, sources: [carrier-pigeon]}"))
+    with pytest.raises(ValueError, match="trigger.sources"):
+        load(p)
+
+
+def test_radar_hit_confirmed_by_apple_runs_checkout(tmp_path, monkeypatch):
+    h = Harness(tmp_path, monkeypatch, apple=[stock("R327")])
+    h.cfg.trigger_sources = ("ntfy", "radar")
+    hit = trig.make(PART, "R327", SECRET, seen_at=now() - timedelta(seconds=4))
+
+    def radar_fn(*a, **k):
+        yield trig.Event("keepalive")
+        yield trig.Event("message", json.dumps(hit))
+
+    cli._watch_triggers(h.cfg, listen_fn=lambda *a, **k: iter([trig.Event("connected")]), radar_fn=radar_fn)
+    assert h.acted == [("review", PART, ["R327"])]
+
+
+def test_fatal_source_alone_exits_no_restart(tmp_path, monkeypatch):
+    h = Harness(tmp_path, monkeypatch)
+
+    def listen(*a, **k):
+        raise PermissionError("ntfy refused the subscription (HTTP 403)")
+        yield  # pragma: no cover
+    assert cli._watch_triggers(h.cfg, listen_fn=listen) == cli.EXIT_NO_RESTART
+    assert any("stopped" in t for t in h.sent)

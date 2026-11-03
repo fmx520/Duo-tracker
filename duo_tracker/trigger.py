@@ -209,3 +209,102 @@ def publish(server: str, topic: str, payload: dict, *, token: str = "", http_pos
     r = http_post(f"{server.rstrip('/')}/{topic}", data=json.dumps(payload).encode("utf-8"),
                   headers=headers, timeout=10)
     r.raise_for_status()
+
+
+# ── radar source (duo-tracker-six.vercel.app) ─────────────────────────────────
+DEFAULT_RADAR_URL = "https://duo-tracker-six.vercel.app"
+RADAR_STALE_SECONDS = 60      # radar's own last good sweep older than this → treat as down
+RADAR_REEMIT_SECONDS = 30     # same (store, part) won't re-trigger within this window
+
+
+def radar(url: str, *, secret: str, parts: set[str], store_allowed: Callable[[str], bool],
+          poll_s: float = 5, http_get=None, sleep: Callable[[float], None] = time.sleep,
+          clock: Callable[[], float] = time.monotonic, now: Callable[[], datetime] | None = None,
+          max_backoff_s: float = 120) -> Iterator[Event]:
+    """Poll the public NYC pickup radar and turn new in-stock entries into signed triggers.
+
+    The radar is someone else's unauthenticated service, so its data is only a
+    hint: each entry becomes a locally signed trigger that then goes through
+    the same validate() → confirm-with-Apple path as any other. ``seen_at`` is
+    the radar's own ``changed_at``, so the 90s freshness limit measures from
+    when the radar saw the drop, not from when we noticed.
+
+    Yields "keepalive" after each healthy poll, "disconnected" when the radar is
+    unreachable or its last sweep is stale, and "message" for each new hit.
+    """
+    import random
+
+    http_get = http_get or requests.get
+    now = now or (lambda: datetime.now(timezone.utc))
+    endpoint = f"{url.rstrip('/')}/api/state"
+    headers = {"User-Agent": "Duo-tracker trigger bridge (personal use)", "Cache-Control": "no-cache"}
+    seen: set[tuple] = set()            # (store, part, changed_at) already emitted
+    last_emit: dict[tuple, float] = {}  # (store, part) -> clock() of last emit
+    delay = poll_s
+    while True:
+        try:
+            r = http_get(endpoint, headers=headers, timeout=5)
+            r.raise_for_status()
+            data = r.json()
+            status = data.get("status") or {}
+            ok_at = status.get("last_ok_at")
+            age = (now() - datetime.fromisoformat(ok_at.replace("Z", "+00:00"))).total_seconds() if ok_at else None
+            if age is None or age > RADAR_STALE_SECONDS:
+                yield Event("disconnected", f"radar stale (last good sweep {'never' if age is None else f'{age:.0f}s ago'})")
+            else:
+                delay = poll_s
+                yield Event("keepalive")
+                for entry in data.get("stock") or []:
+                    store, part, changed = entry.get("store_id"), entry.get("part_number"), entry.get("changed_at")
+                    if not (isinstance(store, str) and isinstance(part, str) and isinstance(changed, str)):
+                        continue
+                    if part not in parts or not store_allowed(store):
+                        continue
+                    if (store, part, changed) in seen:
+                        continue
+                    seen.add((store, part, changed))
+                    if clock() - last_emit.get((store, part), -1e9) < RADAR_REEMIT_SECONDS:
+                        continue
+                    last_emit[(store, part)] = clock()
+                    try:
+                        seen_at = datetime.fromisoformat(changed.replace("Z", "+00:00"))
+                    except ValueError:
+                        continue
+                    yield Event("message", json.dumps(make(part, store, secret, seen_at=seen_at)), f"radar:{store}:{part}")
+                if len(seen) > 5000:
+                    seen = set(list(seen)[-1000:])
+        except Exception as e:
+            yield Event("disconnected", f"radar unreachable: {type(e).__name__}: {e}")
+            delay = min(max(delay, poll_s) * 2, max_backoff_s)
+        sleep(delay * random.uniform(0.85, 1.15))
+
+
+def merged(sources: dict[str, Callable[[], Iterator[Event]]]) -> Iterator[tuple[str, Event]]:
+    """Run each event source in its own thread; yield (source_name, event) as they arrive.
+
+    Sources only do network I/O; everything that touches the browser stays on
+    the caller's thread. A source that raises is reported once as a "fatal"
+    event and not restarted; one that simply finishes reports "ended". The
+    iterator stops when every source has done one or the other.
+    """
+    import queue
+    import threading
+
+    q: queue.Queue = queue.Queue()
+
+    def pump(name, factory):
+        try:
+            for ev in factory():
+                q.put((name, ev))
+            q.put((name, Event("ended")))
+        except BaseException as e:  # noqa: BLE001 - report, don't die silently
+            q.put((name, Event("fatal", f"{type(e).__name__}: {e}")))
+
+    for name, factory in sources.items():
+        threading.Thread(target=pump, args=(name, factory), daemon=True, name=f"trigger-{name}").start()
+    alive = len(sources)
+    while alive:
+        name, ev = q.get()
+        if ev.kind in ("fatal", "ended"):
+            alive -= 1
+        yield name, ev

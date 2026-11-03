@@ -434,9 +434,11 @@ def _choose_window(page: Page) -> None:
 ACCOUNT_URL = "https://www.apple.com/shop/account/home"
 ACCOUNT_HINTS = ("/shop/account", "/shop/orders")
 # A real sign-in/2FA prompt, as opposed to Apple's redirect *through* the
-# sign-in host: password field, or the idmsa form elements it renders.
+# sign-in host: credential fields only. NOT input[type=tel] -- the signed-in
+# account page renders a phone field for pickup contact, and treating that as
+# a sign-in prompt is exactly the false negative this check is here to avoid.
 SIGNIN_FIELDS = ('input[type="password"], input[name="accountName"], '
-                 'input[id*="account_name" i], #remember-me, input[type="tel"]')
+                 'input[id*="account_name" i], #remember-me')
 
 
 def signed_in(page: Page) -> bool:
@@ -447,7 +449,7 @@ def signed_in(page: Page) -> bool:
     /shop/signIn/account?ssi=… -- it is how Apple refreshes the session and it
     forwards on to the account page a moment later. So a sign-in URL alone
     proves nothing: judge by where the redirect chain SETTLES and whether a
-    sign-in form is actually on the page.
+    credential form is actually on the page.
     """
     page.goto(ACCOUNT_URL, wait_until="domcontentloaded", timeout=60_000)
     deadline = time.monotonic() + 25
@@ -459,17 +461,17 @@ def signed_in(page: Page) -> bool:
             continue
         if any(h in url for h in SIGNIN_HINTS):
             # Sign-in host/path: only signed out if it STAYS here with a form.
-            if _visible(page, SIGNIN_FIELDS) or _visible(page, 'input[type="password"]'):
+            if _visible(page, SIGNIN_FIELDS):
                 return False
             page.wait_for_timeout(500)
             continue
         if any(h in url for h in ACCOUNT_HINTS):
             return True
-        # Some other apple.com page: if a sign-in form is on it, signed out;
+        # Some other apple.com page: a credential form means signed out;
         # otherwise give the redirect another beat to finish.
         if _visible(page, SIGNIN_FIELDS):
             return False
         page.wait_for_timeout(500)
-    # Timed out mid-redirect: treat "no sign-in form anywhere" as signed in,
+    # Timed out mid-redirect: treat "no credential form anywhere" as signed in,
     # matching the watcher's don't-cry-wolf rule.
     return not _visible(page, SIGNIN_FIELDS)

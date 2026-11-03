@@ -343,3 +343,27 @@ def test_signed_in_check(browser, state):
     ctx = browser.new_context()
     ctx.route("**/*", _account_route(state))
     assert signed_in(ctx.new_page()) is state
+
+
+def _account_with_phone_route():
+    """The signed-in account page renders a phone field (pickup contact). It
+    must NOT be mistaken for a sign-in prompt -- that false negative blocked
+    rehearse on the owner's real profile."""
+    def handle(route):
+        path = urlparse(route.request.url).path
+        if path == "/shop/account/home":
+            return route.fulfill(status=200, content_type="text/html", body="""
+                <h1>Your Account</h1>
+                <h2>Who's picking up?</h2>
+                <input type="tel" name="pickupContact.phone" placeholder="Mobile phone">
+                <input type="text" name="pickupContact.name" placeholder="Full name">
+            """)
+        return route.fulfill(status=200, content_type="text/html", body="<h1>x</h1>")
+    return handle
+
+
+def test_signed_in_account_page_with_phone_field_is_signed_in(browser):
+    from duo_tracker.checkout import signed_in
+    ctx = browser.new_context()
+    ctx.route("**/*", _account_with_phone_route())
+    assert signed_in(ctx.new_page()) is True

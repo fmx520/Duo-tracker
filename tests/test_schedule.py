@@ -108,6 +108,7 @@ def test_store_filter_matches_preset_by_name_or_number():
 def test_watch_loop_uses_schedule_and_logs_blocks(tmp_path, monkeypatch):
     """Drive cmd_watch with a scripted browser: peak rate, then a block, then the slowed rate."""
     pytest.importorskip("playwright")
+    import random
     import types
 
     from duo_tracker import browser, checkout, cli
@@ -115,6 +116,10 @@ def test_watch_loop_uses_schedule_and_logs_blocks(tmp_path, monkeypatch):
     from duo_tracker.schedule import Schedule
 
     monkeypatch.setattr(checkout, "STATE_DIR", tmp_path / "state")
+    # the watch loop jitters its interval by ±30% on purpose (timing evasion);
+    # pin it so this test can assert exact waits
+    monkeypatch.setattr(random, "uniform", lambda a, b: 1.0)
+    monkeypatch.setattr(random, "shuffle", lambda x: None)
     cfgp = tmp_path / "c.yaml"
     cfgp.write_text("models: [256gb-nightsky]\ncheckout: {mode: alert}\nhealth: {daily_summary_hour: null}\n"
                     "schedule: {default_seconds: 90, windows: [{start: '07:30', end: '09:30', seconds: 30}]}\n")

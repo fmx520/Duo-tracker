@@ -28,6 +28,10 @@ class Config:
     max_miles: float | None
     alert_on_courier: bool
     max_total: float | None
+    daily_summary_hour: int | None = 9
+    stall_minutes: int = 10
+    healthcheck_url: str = ""
+    signin_check_minutes: int = 60
 
     def cap_for(self, model: Model) -> float:
         return self.max_total if self.max_total is not None else round(model.price * DEFAULT_TAX_HEADROOM, 2)
@@ -56,6 +60,7 @@ def load(path: str | Path) -> Config:
 
     ntfy = raw.get("ntfy") or {}
     browser = raw.get("browser") or {}
+    health = raw.get("health") or {}
     return Config(
         models=models,
         carrier=CARRIERS[carrier_key],
@@ -70,4 +75,17 @@ def load(path: str | Path) -> Config:
         max_miles=float(raw["max_miles"]) if raw.get("max_miles") is not None else None,
         alert_on_courier=bool(raw.get("alert_on_courier", True)),
         max_total=float(checkout["max_total"]) if checkout.get("max_total") is not None else None,
+        daily_summary_hour=_opt_hour(health.get("daily_summary_hour", 9)),
+        stall_minutes=max(3, int(health.get("stall_minutes", 10))),
+        healthcheck_url=str(health.get("healthcheck_url") or ""),
+        signin_check_minutes=max(15, int(raw.get("signin_check_minutes", 60))),
     )
+
+
+def _opt_hour(v) -> int | None:
+    if v is None or v is False:
+        return None
+    h = int(v)
+    if not 0 <= h <= 23:
+        raise ValueError("config: health.daily_summary_hour must be 0–23 (or null to disable)")
+    return h

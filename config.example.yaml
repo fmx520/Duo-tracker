@@ -31,6 +31,13 @@ checkout:
   mode: bag
   # max_total: 2250        # hard cap on the order total; default = model price × 1.11
 
+health:
+  daily_summary_hour: 9    # daily "still watching" push; null to disable
+  stall_minutes: 10        # alert if no successful check for this long
+  healthcheck_url: ""      # optional healthchecks.io ping URL: alerts you if the whole box goes offline
+
+signin_check_minutes: 60   # review/submit modes: confirm you're still signed in to Apple
+
 browser:
   channel: chrome          # uses your installed Google Chrome; "chromium" for Playwright's bundled one
   profile_dir: ~/.duo-tracker/profile

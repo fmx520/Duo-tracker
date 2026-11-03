@@ -303,3 +303,40 @@ def test_watcher_hit_stop_notifies_you(browser, tmp_path):
     fake, notes = FakeApple(cvv=True), Notes()
     _act_on_hit(_hit_page(browser, fake), _cfg(tmp_path, "submit"), notes, MODEL, [_store()])
     assert fake.orders == [] and notes.sent[-1][0] == "⚠️ Checkout needs you NOW"
+
+
+def test_checkout_reports_step_timings(browser):
+    from duo_tracker.checkout import format_timings
+    res = run(open_page(browser, FakeApple()), pickup_plan())
+    steps = [s for s, _ in res.timings]
+    assert steps[0] == "check out" and "fulfillment" in steps and "review verified" in steps
+    assert steps[-1] == "order confirmed"
+    assert all(b >= a for (_, a), (_, b) in zip(res.timings, res.timings[1:]))
+    assert "total" in format_timings(res.timings)
+
+
+def test_stopped_checkout_carries_timings(browser):
+    with pytest.raises(CheckoutStopped) as ei:
+        run(open_page(browser, FakeApple(cvv=True)), pickup_plan())
+    assert [s for s, _ in ei.value.timings][:2] == ["check out", "fulfillment"]
+
+
+def _account_route(signed_in):
+    def handle(route):
+        path = urlparse(route.request.url).path
+        if path == "/shop/account/home" and not signed_in:
+            return route.fulfill(status=200, content_type="text/html",
+                                 body="<script>location.replace('/signin')</script>")
+        if path == "/signin":
+            return route.fulfill(status=200, content_type="text/html",
+                                 body="<input type=email><input type=password>")
+        return route.fulfill(status=200, content_type="text/html", body="<h1>Your Account</h1>")
+    return handle
+
+
+@pytest.mark.parametrize("state", [True, False])
+def test_signed_in_check(browser, state):
+    from duo_tracker.checkout import signed_in
+    ctx = browser.new_context()
+    ctx.route("**/*", _account_route(state))
+    assert signed_in(ctx.new_page()) is state

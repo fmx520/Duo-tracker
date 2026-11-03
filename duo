@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Friendly wrapper: ./duo <command>   (init, setup, check, rehearse, watch, status, logs, start, stop, vnc)
+set -euo pipefail
+cd "$(dirname "$0")"
+PY=.venv/bin/python
+[ -x "$PY" ] || PY=python3
+
+linux_service() { [ "$(uname -s)" = Linux ] && systemctl --user cat duo-tracker.service >/dev/null 2>&1; }
+
+# Headless Linux: use the service's virtual screen so you can watch/drive it over VNC.
+if [ "$(uname -s)" = Linux ] && [ -z "${DISPLAY:-}" ] && systemctl --user is-active -q duo-display 2>/dev/null; then
+  export DISPLAY=:99
+fi
+
+cmd="${1:-help}"
+case "$cmd" in
+  status) exec systemctl --user status duo-tracker duo-display duo-vnc --no-pager ;;
+  logs)   exec journalctl --user -u duo-tracker -f -n 50 ;;
+  start)  exec systemctl --user start duo-tracker ;;
+  stop)   exec systemctl --user stop duo-tracker ;;
+  vnc)    ip=$(hostname -I 2>/dev/null | awk '{print $1}'); echo "Connect a VNC viewer to:  vnc://${ip:-$(hostname)}:5900"; exit 0 ;;
+  help|-h|--help)
+    cat <<'TXT'
+./duo init        set up config.yaml (asks a few questions)
+./duo setup       sign in to Apple + pick your store in the bot's browser
+./duo check       check stock once
+./duo rehearse    practice checkout (never orders); arms auto-buy for 7 days
+./duo watch       run in this terminal
+Linux service:    ./duo start | stop | status | logs | vnc
+TXT
+    exit 0 ;;
+esac
+
+# These need the browser profile, which the background watcher holds; pause it meanwhile.
+if [[ "$cmd" =~ ^(setup|check|rehearse|watch)$ ]] && linux_service && systemctl --user is-active -q duo-tracker; then
+  echo "Pausing the background watcher while this runs…"
+  systemctl --user stop duo-tracker
+  trap 'systemctl --user start duo-tracker && echo "Background watcher resumed."' EXIT
+fi
+"$PY" -m duo_tracker "$@"

@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -55,6 +55,7 @@ class CheckoutStopped(Exception):
     def __init__(self, step: str, reason: str, report: Path | None = None):
         super().__init__(f"{step}: {reason}")
         self.step, self.reason, self.report = step, reason, report
+        self.timings: list[tuple[str, float]] = []
 
 
 @dataclass
@@ -74,6 +75,15 @@ class Result:
     total: float | None
     store: str
     confirmation: str = ""
+    timings: list = field(default_factory=list)  # [(step, seconds since checkout start)]
+
+
+def format_timings(timings) -> str:
+    out, prev = [], 0.0
+    for step, t in timings:
+        out.append(f"{step} +{t - prev:.1f}s")
+        prev = t
+    return " → ".join(out) + (f"  (total {timings[-1][1]:.1f}s)" if timings else "")
 
 
 # ── state files ───────────────────────────────────────────────────────────────
@@ -278,15 +288,21 @@ def empty_bag(page: Page) -> int:
 # ── the flow ──────────────────────────────────────────────────────────────────
 def run(page: Page, plan: Plan) -> Result:
     """Drive checkout from the bag page. Raises CheckoutStopped on any doubt."""
+    marks: list[tuple[str, float]] = []
+    t0 = time.monotonic()
+    mark = lambda name: marks.append((name, round(time.monotonic() - t0, 2)))  # noqa: E731
     try:
-        return _run(page, plan)
+        res = _run(page, plan, mark)
+        res.timings = marks
+        return res
     except CheckoutStopped as e:
         if e.report is None:
             e.report = save_report(page, e.step, e.reason)
+        e.timings = marks
         raise
 
 
-def _run(page: Page, plan: Plan) -> Result:
+def _run(page: Page, plan: Plan, mark=lambda name: None) -> Result:
     if plan.submit and order_lock():
         _stop(page, "start", "an order was already placed by this tool "
                              "(delete ~/.duo-tracker/order.lock to allow another)")
@@ -299,6 +315,7 @@ def _run(page: Page, plan: Plan) -> Result:
     if not btn:
         _stop(page, "bag", "couldn't find Check Out")
     _click_and_settle(page, btn)
+    mark("check out")
 
     # 2. Pickup or delivery (Apple may skip the chooser)
     guard(page, "fulfillment")
@@ -313,6 +330,7 @@ def _run(page: Page, plan: Plan) -> Result:
     if plan.fulfillment == "pickup":
         store_label = _choose_store(page, plan)
         _choose_window(page)
+    mark("fulfillment")
 
     # 3. Click through Continue… until the review page
     for i in range(MAX_CONTINUE_STEPS):
@@ -323,6 +341,7 @@ def _run(page: Page, plan: Plan) -> Result:
         if kind is None:
             _stop(page, f"step {i + 1}", "no Continue or Place Order button")
         _click_and_settle(page, nxt)
+        mark(f"continue {i + 1}")
     else:
         _stop(page, "review", f"didn't reach the review page in {MAX_CONTINUE_STEPS} steps")
 
@@ -338,6 +357,7 @@ def _run(page: Page, plan: Plan) -> Result:
         _stop(page, "review", "couldn't read the order total")
     if plan.max_total is not None and total > plan.max_total:
         _stop(page, "review", f"total ${total:,.2f} is over the ${plan.max_total:,.2f} cap")
+    mark("review verified")
 
     if not plan.submit:
         return Result(placed=False, total=total, store=store_label)
@@ -369,6 +389,7 @@ def _run(page: Page, plan: Plan) -> Result:
                 page.wait_for_timeout(250)
             break
         page.wait_for_timeout(500)
+    mark("order confirmed" if confirmation or "thankyou" in page.url.lower() else "order submitted")
     lock.update(state="confirmed" if confirmation or "thankyou" in page.url.lower() else "unconfirmed",
                 confirmation=confirmation)
     _write_lock(lock)
@@ -407,3 +428,20 @@ def _choose_window(page: Page) -> None:
     if opts:
         sel.first.select_option(opts[0])
         page.wait_for_timeout(300)
+
+
+# ── sign-in check ─────────────────────────────────────────────────────────────
+ACCOUNT_URL = "https://www.apple.com/shop/account/home"
+
+
+def signed_in(page: Page) -> bool:
+    """Load your Apple Store account page; False if Apple bounces it to sign-in."""
+    page.goto(ACCOUNT_URL, wait_until="domcontentloaded", timeout=60_000)
+    deadline = time.monotonic() + 6
+    while time.monotonic() < deadline:  # sign-in redirects / iframes can arrive a beat late
+        url = page.url.lower()
+        if any(h in url for h in SIGNIN_HINTS) or _visible(page, 'input[type="password"]') \
+                or any("idmsa.apple.com" in (f.url or "") for f in page.frames):
+            return False
+        page.wait_for_timeout(500)
+    return True

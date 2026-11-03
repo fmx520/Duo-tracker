@@ -11,6 +11,8 @@ Ground rules this module sticks to on purpose:
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import time
 from urllib.parse import unquote
 
@@ -30,6 +32,11 @@ class Blocked(Exception):
 
 
 def open_context(pw: Playwright, cfg: Config) -> BrowserContext:
+    if sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        raise RuntimeError(
+            "no screen for the browser. On a headless Linux box, run commands through `./duo …` "
+            "after `scripts/install-linux-service.sh` (it provides a virtual screen you can VNC into), "
+            "or prefix with `xvfb-run -a`.")
     cfg.profile_dir.mkdir(parents=True, exist_ok=True)
     kwargs = dict(user_data_dir=str(cfg.profile_dir), headless=False, no_viewport=True)
     if cfg.browser_channel and cfg.browser_channel != "chromium":
@@ -131,7 +138,11 @@ def go_to_bag(page: Page) -> bool:
     return True
 
 
-def sleep_with_status(seconds: float) -> None:
+def sleep_with_status(seconds: float, on_tick=None) -> None:
     end = time.monotonic() + seconds
+    last = 0.0
     while (left := end - time.monotonic()) > 0:
         time.sleep(min(1.0, left))
+        if on_tick and time.monotonic() - last >= 5:
+            last = time.monotonic()
+            on_tick()

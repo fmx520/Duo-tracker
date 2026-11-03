@@ -31,39 +31,94 @@ Apple doesn't want automated stock checking, and this tool respects that. If
 Apple blocks it for a while, it waits instead of trying to sneak around the
 block.
 
-## Setup (Mac, ~5 minutes)
+## Install
+
+The repo is private, so clone it with your GitHub login, then run the installer:
 
 ```bash
-git clone https://github.com/fmx520/Duo-tracker.git && cd Duo-tracker
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium        # fallback if you don't have Google Chrome
-
-cp config.example.yaml config.yaml # then edit: models, carrier, ntfy topic
-python -m duo_tracker models       # list model keys / part numbers / prices
+git clone https://github.com/fmx520/Duo-tracker.git && cd Duo-tracker && ./install.sh
 ```
 
-1. **Phone alerts:** install the **ntfy** app (iOS/Android) and subscribe to a
-   long, unguessable topic name. Put the same name in `config.yaml` under
-   `ntfy.topic`. Then run `python -m duo_tracker notify-test`.
-2. **Sign in and pick a store:** run `python -m duo_tracker setup`. A Chrome window
-   opens. Sign in to your Apple Account (approve 2FA), choose any Duo config,
-   click **Check availability**, enter your ZIP, and select a store. Then close
-   the window. Apple remembers the store in this profile, and the store list it
-   returns is what the bot watches.
-3. **Dry run:** run `python -m duo_tracker check`. It checks each model once and
-   prints something like `0/12 stores have it`. If it says "no store data", redo step 2.
-4. **Rehearse checkout:** run `python -m duo_tracker rehearse`. It does the
-   whole checkout with a **delivery** order (Duo delivery is still orderable,
-   shipping in January), **stops on the review page without ordering**, then
-   empties your bag. Add `--pickup-item-url <any in-stock accessory page>` to
-   also rehearse the pickup steps, including choosing a store and a pickup
-   time. Do this one if you can. If a step misses, it saves a small JSON
-   report of that page's buttons (labels only, no personal field values).
-   Send it over and the selectors get fixed. A passing rehearsal arms
-   `submit` mode for 7 days.
-5. **Go:** run `python -m duo_tracker watch`. Leave the window alone, but you
-   can minimize it. Keep the Mac awake with `caffeinate -dims python -m duo_tracker watch`.
+`install.sh` sets up Python packages and a browser, and on Linux also the
+virtual screen and VNC server. It then runs the **setup wizard** (`./duo init`).
+The wizard asks which models, your carrier, the mode, the distance, and your
+ntfy topic, writes `config.yaml`, and sends a test notification. Install the
+**ntfy** app on your phone and subscribe to the topic it shows you.
+
+Everything after that goes through `./duo`:
+
+| Command | What it does |
+|---|---|
+| `./duo setup` | Opens the bot's browser. Sign in to your Apple Account (approve 2FA), choose any Duo config, click **Check availability**, enter your ZIP and pick a store, then close the window. |
+| `./duo check` | Checks stock once (`0/12 stores have it`). "No store data" means redo `setup`. |
+| `./duo rehearse` | Practice checkout (see below). Never orders. A pass arms auto-buy for 7 days. |
+| `./duo watch` | Watches in this terminal. |
+
+## Running 24/7 on a headless Linux box (recommended)
+
+A spare always-on computer at home is the best place for this. It's on your
+home internet and in your real browser profile, and it doesn't compete with
+you for a screen. Cloud servers don't work: Apple blocks data-center
+connections.
+
+```bash
+./install.sh                         # once
+scripts/install-linux-service.sh     # once: virtual screen + VNC + auto-start
+./duo setup                          # then VNC in (below) and sign in to Apple
+./duo rehearse
+./duo start
+```
+
+- The bot draws its Chrome window on a **virtual screen**. To see or drive it,
+  connect a VNC viewer to `vnc://<box-ip>:5900` (`./duo vnc` prints the address)
+  with the password you chose. On a Mac: Finder → Go → Connect to Server. On an
+  iPhone: a VNC app such as RealVNC Viewer. This is how you sign in, and how you
+  take over when checkout says **"needs you"**.
+- VNC is for your home network only. **Don't port-forward 5900.** To reach it
+  away from home, put the box and your phone on [Tailscale](https://tailscale.com).
+- `./duo status` shows whether things are healthy, `./duo logs` follows the
+  output, and `./duo stop` / `./duo start` control the watcher. It restarts
+  itself after crashes and reboots. `setup`, `check` and `rehearse` pause the
+  background watcher while they run and resume it afterwards.
+- The service installer offers to stop the box from ever sleeping. Say yes.
+
+## Running on a Mac
+
+`./install.sh`, then `./duo setup` and `./duo rehearse`, then **double-click
+`Start Duo Tracker.command`**. It keeps the Mac awake while it watches. It only
+watches while the Mac is on and that window is open.
+
+## Rehearse checkout before it buys anything
+
+`./duo rehearse` first confirms you're signed in to Apple. It then does the
+whole checkout with a **delivery** order (Duo delivery is still orderable,
+shipping in January), **stops on the review page without ordering**, and
+empties your bag. It prints how long each step took.
+
+Add `--pickup-item-url <any in-stock accessory page>` to also rehearse the
+pickup steps (choosing a store and a pickup time). Please do. If a step misses,
+it saves a small JSON report of that page's buttons (labels only, no personal
+field values) under `~/.duo-tracker/reports/`. Send it over and the selectors
+get fixed.
+
+## Staying informed: health alerts
+
+The scary failure is a watcher that quietly stopped working. So it tells you:
+
+| Alert | When |
+|---|---|
+| **Duo-tracker started** | Every start, so you also hear about reboots and restarts |
+| **Daily check-in** | Once a day (9am by default): healthy or stalled, plus checks and drops since yesterday |
+| **⚠️ stalled** / **recovered** | No successful check for 10 min, then again when checks come back |
+| **⚠️ Signed out of Apple** | Hourly sign-in check failed (review/submit modes), so checkout would hit a sign-in page. VNC in and sign in. |
+| **paused** | Apple blocked checks. It backs off and says so. |
+
+**If the whole box dies** (power cut, internet down), it can't tell you
+itself. For that, create a free check at [healthchecks.io](https://healthchecks.io).
+Set its period to 5 minutes, connect it to your phone (it supports ntfy, email,
+and more), and paste its ping URL into `health.healthcheck_url`. The tracker
+pings it after successful checks, and healthchecks.io alerts you when the pings
+stop.
 
 When stock hits you'll get **🚨 iPhone Duo … IN STOCK**, then one of:
 
@@ -116,6 +171,8 @@ See [`config.example.yaml`](config.example.yaml). The settings most people chang
 | `alert_on_courier` | also alert when same-day courier delivery is available |
 | `checkout.mode` | `alert` (push only), `bag` (default), `review` (fill checkout, you click Place Order), or `submit` (full auto) |
 | `checkout.max_total` | optional hard cap on the order total; default is model price × 1.11 |
+| `health.*` | `daily_summary_hour` (or `null`), `stall_minutes`, `healthcheck_url` |
+| `signin_check_minutes` | how often to confirm you're still signed in to Apple (default 60) |
 
 ## Prior art
 

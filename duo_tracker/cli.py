@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import socket
 import sys
 import time
 from datetime import datetime
@@ -10,6 +11,10 @@ from .catalog import BUY_URL, CARRIERS, MODELS
 from .notify import Notifier
 
 log = logging.getLogger("duo_tracker")
+
+# Exit code for "won't fix itself by restarting" (bad config, order already
+# placed, no rehearsal). The systemd unit is told not to restart on it.
+EXIT_NO_RESTART = 3
 
 
 def _ts() -> str:
@@ -36,6 +41,101 @@ def cmd_notify_test(args) -> int:
     )
     print("sent" if ok else "FAILED — check the topic/server")
     return 0 if ok else 1
+
+
+def _ask(prompt: str, default: str = "", check=None, input_fn=input) -> str:
+    while True:
+        ans = input_fn(f"{prompt}" + (f" [{default}]" if default else "") + ": ").strip() or default
+        if check is None:
+            return ans
+        try:
+            check(ans)
+            return ans
+        except (ValueError, KeyError) as e:
+            print(f"  ✘ {e}")
+
+
+CONFIG_TEMPLATE = """# Written by `python -m duo_tracker init`. Edit freely; see config.example.yaml for every option.
+models:
+{models}
+carrier: {carrier}
+stores: [{stores}]
+max_miles: {max_miles}
+alert_on_courier: true
+interval_seconds: 30
+
+ntfy:
+  server: https://ntfy.sh
+  topic: {topic}
+
+checkout:
+  mode: {mode}            # alert | bag | review | submit
+  # max_total: 2250        # default cap = model price x 1.11
+
+health:
+  daily_summary_hour: 9    # daily "still watching" push at 9am; null to disable
+  stall_minutes: 10
+  healthcheck_url: "{hc}"
+
+browser:
+  channel: chrome
+  profile_dir: ~/.duo-tracker/profile
+"""
+
+
+def cmd_init(args, input_fn=input) -> int:
+    import secrets
+    from pathlib import Path
+
+    from .catalog import resolve
+
+    path = Path(args.config)
+    if path.exists() and _ask(f"{path} exists — overwrite? (y/n)", "n", input_fn=input_fn).lower() != "y":
+        print("Left it alone.")
+        return 0
+
+    print("\nWhich iPhone Duo models do you want? (comma-separated numbers)")
+    keys = list(MODELS)
+    for i, k in enumerate(keys, 1):
+        print(f"  {i}. {MODELS[k].name} — ${MODELS[k].price:,}")
+
+    def pick(ans):
+        nums = [int(x) for x in ans.replace(" ", "").split(",") if x]
+        if not nums or any(not 1 <= n <= len(keys) for n in nums):
+            raise ValueError(f"pick numbers between 1 and {len(keys)}")
+    chosen = [keys[int(x) - 1] for x in _ask("Models", "1", pick, input_fn).replace(" ", "").split(",") if x]
+    for k in chosen:
+        resolve(k)
+
+    carrier = _ask(f"Carrier ({' / '.join(CARRIERS)})", "unlocked",
+                   lambda a: CARRIERS[a.lower()], input_fn).lower()
+
+    print("\nWhat should happen when one drops?\n"
+          "  alert  – just notify me\n"
+          "  bag    – put it in my bag\n"
+          "  review – fill in checkout, I tap Place Order\n"
+          "  submit – buy it automatically (needs a passing `rehearse` first)")
+    def valid_mode(a):
+        if a not in ("alert", "bag", "review", "submit"):
+            raise ValueError("choose alert, bag, review or submit")
+    mode = _ask("Mode", "submit", valid_mode, input_fn)
+
+    max_miles = _ask("Ignore stores farther than how many miles?", "20", lambda a: float(a), input_fn)
+    stores = _ask("Only these stores? (comma-separated names, blank = any nearby)", "", input_fn=input_fn)
+    topic = _ask("ntfy topic (install the ntfy app and subscribe to this)", f"duo-{secrets.token_hex(5)}",
+                 input_fn=input_fn)
+    hc = _ask("healthchecks.io ping URL for 'box went offline' alerts (blank to skip)", "", input_fn=input_fn)
+
+    store_list = ", ".join(f'"{x.strip()}"' for x in stores.split(",") if x.strip())
+    path.write_text(CONFIG_TEMPLATE.format(
+        models="\n".join(f"  - {k}" for k in chosen), carrier=carrier, stores=store_list,
+        max_miles=max_miles, topic=topic, mode=mode, hc=hc))
+    print(f"\n✔ wrote {path}")
+
+    if _ask("Send a test notification now? (y/n)", "y", input_fn=input_fn).lower() == "y":
+        cmd_notify_test(args)
+    print("\nNext: sign in with `setup`, then `rehearse`, then `watch` (or start the service).")
+    return 0
 
 
 def cmd_setup(args) -> int:
@@ -103,8 +203,9 @@ def cmd_watch(args) -> int:
 
     from .availability import hit_keys, matching_stores
     from .browser import Blocked, check_round, open_context, _page, sleep_with_status
-    from .checkout import empty_bag, order_lock, rehearsal_ok
+    from .checkout import empty_bag, order_lock, rehearsal_ok, signed_in
     from .config import load
+    from .health import Health
 
     cfg = load(args.config)
     notifier = Notifier(cfg.ntfy_server, cfg.ntfy_topic)
@@ -114,11 +215,12 @@ def cmd_watch(args) -> int:
         if (lock := order_lock()):
             print(f"Refusing to auto-buy: this tool already placed an order ({lock.get('model')} at "
                   f"{lock.get('store')}, {lock.get('at')}). Delete ~/.duo-tracker/order.lock to allow another.")
-            return 1
+            return EXIT_NO_RESTART
         ok, why = rehearsal_ok()
         if not ok:
             print(f"Refusing to auto-buy: {why}.")
-            return 1
+            notifier.send("Duo-tracker not armed", f"Auto-buy refused: {why}.", urgent=False, tags="warning")
+            return EXIT_NO_RESTART
         print(f"Auto-buy armed ({why}). Caps: " +
               ", ".join(f"{m.key} ≤ ${cfg.cap_for(m):,.2f}" for m in cfg.models))
 
@@ -128,6 +230,11 @@ def cmd_watch(args) -> int:
     warned_no_store = False
     errors_in_a_row = 0
     live: dict[str, str] = {}  # what was in stock last round, so we alert on new drops only
+    health = Health(notifier, daily_hour=cfg.daily_summary_hour, stall_minutes=cfg.stall_minutes,
+                    healthcheck_url=cfg.healthcheck_url)
+    needs_signin = cfg.checkout_mode in ("review", "submit")
+    last_signin_check = 0.0
+    signed_out_notified = False
 
     with sync_playwright() as pw:
         ctx = open_context(pw, cfg)
@@ -136,20 +243,41 @@ def cmd_watch(args) -> int:
             n = empty_bag(page)
             if n:
                 print(f"Emptied {n} item(s) from your bag so checkout only contains the phone.")
+        notifier.send("Duo-tracker started", f"Watching on {socket.gethostname()} "
+                      f"({', '.join(m.key for m in cfg.models)}; mode {cfg.checkout_mode}).",
+                      urgent=False, tags="eyes")
         try:
             while True:
+                if needs_signin and time.monotonic() - last_signin_check >= cfg.signin_check_minutes * 60:
+                    last_signin_check = time.monotonic()
+                    try:
+                        ok = signed_in(page)
+                    except Exception as e:
+                        ok = True  # couldn't tell; don't cry wolf
+                        print(f"[{_ts()}] sign-in check failed: {e}")
+                    if not ok and not signed_out_notified:
+                        signed_out_notified = True
+                        print(f"[{_ts()}] Signed out of Apple — sign back in (VNC into the box) or checkout will stop.")
+                        notifier.send("⚠️ Signed out of Apple", "Sign back in on the tracker's browser "
+                                      "(VNC on the Linux box), or auto-checkout will stop at sign-in.", tags="warning")
+                    elif ok and signed_out_notified:
+                        signed_out_notified = False
+                        notifier.send("Signed back in", "Auto-checkout is ready again.", urgent=False,
+                                      tags="white_check_mark")
                 now: dict[str, str] = {}
                 checked: set[str] = set()
                 try:
                     for m, av in check_round(page, cfg.models, cfg.carrier):
                         if isinstance(av, Exception):
                             errors_in_a_row += 1
+                            health.problem(str(av))
                             print(f"[{_ts()}] {m.name}: error: {av}")
                             if errors_in_a_row == 5:
                                 notifier.send("Duo-tracker needs attention", f"5 errors in a row; last: {av}",
                                               urgent=False, tags="warning")
                             continue
                         errors_in_a_row = 0
+                        health.success()
                         checked.add(m.part)
                         stores = matching_stores(av, cfg.store_filter, cfg.max_miles)
                         _report(m, av, stores)
@@ -165,26 +293,30 @@ def cmd_watch(args) -> int:
                         if not fresh:
                             continue
 
+                        health.drop()
                         notifier.send(f"🚨 {m.name} IN STOCK", f"{'; '.join(fresh[:4])}. ${m.price}", click=BUY_URL)
                         fresh_stores = [st for st in stores if f"pickup:{st.store_number}:{m.part}" not in live]
                         if cfg.checkout_mode == "alert" or not fresh_stores:
                             continue  # courier-only drops are alert-only
                         _act_on_hit(page, cfg, notifier, m, fresh_stores)
                         print("\nStopped watching. Browser stays open — press Ctrl-C when done.")
-                        while True:
+                        while True:  # keep the dead-man switch fed so it doesn't report the box down
                             time.sleep(60)
+                            health.ping()
                 except Blocked as e:
                     print(f"[{_ts()}] Apple blocked the request ({e}). Backing off {backoff // 60} min.")
                     notifier.send("Duo-tracker paused", f"Apple blocked checks ({e}). Retrying in {backoff // 60} min.",
                                   urgent=False, tags="warning")
-                    sleep_with_status(backoff)
+                    health.already_notified(f"Apple blocked checks ({e})")
+                    sleep_with_status(backoff, on_tick=health.tick)
                     backoff = min(backoff * 2, 3600)
                     continue
 
                 backoff = cfg.blocked_backoff_seconds
                 # keep last-known state for models that errored this round, so they don't re-alert
                 live = {k: v for k, v in live.items() if k.split(":")[-1] not in checked} | now
-                sleep_with_status(cfg.interval_seconds)
+                health.tick()
+                sleep_with_status(cfg.interval_seconds, on_tick=health.tick)
         except KeyboardInterrupt:
             print("\nbye")
         finally:
@@ -198,7 +330,7 @@ def cmd_watch(args) -> int:
 def _act_on_hit(page, cfg, notifier, model, stores) -> None:
     """Bag the phone and, depending on mode, drive checkout to review or place the order."""
     from .browser import go_to_bag
-    from .checkout import CheckoutStopped, Plan, run
+    from .checkout import CheckoutStopped, Plan, format_timings, run
 
     bag_url = "https://www.apple.com/shop/bag"
     if not go_to_bag(page):
@@ -218,9 +350,12 @@ def _act_on_hit(page, cfg, notifier, model, stores) -> None:
     except CheckoutStopped as e:
         page.bring_to_front()
         print(f"[{_ts()}] checkout stopped at {e.step}: {e.reason}" + (f"\n           report: {e.report}" if e.report else ""))
+        if e.timings:
+            print(f"           timings: {format_timings(e.timings)}")
         notifier.send("⚠️ Checkout needs you NOW", f"{e.reason}. Window is open at that step.", click=bag_url)
         return
     took = time.monotonic() - t0
+    print(f"[{_ts()}] checkout timings: {format_timings(res.timings)}")
     if res.placed:
         conf = f" Order {res.confirmation}." if res.confirmation else " (confirmation page not detected — check email)"
         msg = f"{model.name}, pickup at {res.store}, total ${res.total:,.2f}.{conf} ({took:.0f}s)"
@@ -236,7 +371,7 @@ def cmd_rehearse(args) -> int:
     from playwright.sync_api import sync_playwright
 
     from .browser import go_to_bag, load_buy_page, open_context, select_config, _page
-    from .checkout import CheckoutStopped, Plan, empty_bag, record_rehearsal, run
+    from .checkout import CheckoutStopped, Plan, empty_bag, format_timings, record_rehearsal, run, signed_in
     from .config import load
 
     cfg = load(args.config)
@@ -246,6 +381,9 @@ def cmd_rehearse(args) -> int:
         ctx = open_context(pw, cfg)
         page = _page(ctx)
         try:
+            if not signed_in(page):
+                raise CheckoutStopped("sign-in", "not signed in to Apple — run `setup` first")
+            print("    ✔ signed in to Apple")
             empty_bag(page)
             print(f"1/2 delivery rehearsal with {model.name} (stops on the review page, never orders)…")
             load_buy_page(page)
@@ -255,6 +393,7 @@ def cmd_rehearse(args) -> int:
             r = run(page, Plan(model=model, fulfillment="delivery", max_total=cfg.cap_for(model)))
             results.append(f"delivery ok, review total ${r.total:,.2f}")
             print(f"    ✔ reached review — total ${r.total:,.2f} (cap ${cfg.cap_for(model):,.2f})")
+            print(f"      timings: {format_timings(r.timings)}")
 
             if args.pickup_item_url:
                 print("2/2 pickup rehearsal with the accessory you gave (stops on review)…")
@@ -265,11 +404,14 @@ def cmd_rehearse(args) -> int:
                 r = run(page, Plan(model=model, fulfillment="pickup", check_model_name=False))
                 results.append(f"pickup ok at {r.store or 'first store'}")
                 print(f"    ✔ pickup flow reached review at {r.store or 'the first store'} — total ${r.total:,.2f}")
+                print(f"      timings: {format_timings(r.timings)}")
             else:
                 print("2/2 skipped pickup rehearsal (pass --pickup-item-url with any in-stock accessory to test it)")
         except CheckoutStopped as e:
             record_rehearsal(False, str(e))
             print(f"    ✘ stopped at {e.step}: {e.reason}")
+            if e.timings:
+                print(f"      timings: {format_timings(e.timings)}")
             if e.report:
                 print(f"      Send this file to fix the selectors: {e.report}")
             return 2
@@ -289,6 +431,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="duo_tracker", description="Watch Apple for iPhone Duo pickup stock.")
     p.add_argument("-c", "--config", default="config.yaml")
     sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("init", help="interactive setup: writes config.yaml").set_defaults(fn=cmd_init)
     sub.add_parser("models", help="list model keys and part numbers").set_defaults(fn=cmd_models)
     sub.add_parser("setup", help="sign in and choose a store in the bot's browser profile").set_defaults(fn=cmd_setup)
     sub.add_parser("notify-test", help="send a test push to your ntfy topic").set_defaults(fn=cmd_notify_test)
@@ -300,6 +443,6 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     try:
         return args.fn(args)
-    except (ValueError, KeyError, FileNotFoundError) as e:
+    except (ValueError, KeyError, FileNotFoundError, RuntimeError) as e:
         print(f"error: {e}", file=sys.stderr)
-        return 1
+        return EXIT_NO_RESTART

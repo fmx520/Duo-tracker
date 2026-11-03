@@ -15,7 +15,9 @@ fi
 cmd="${1:-help}"
 case "$cmd" in
   status) exec systemctl --user status duo-tracker duo-display duo-vnc --no-pager ;;
-  logs)   exec journalctl --user -u duo-tracker -f -n 50 ;;
+  logs)   f="$HOME/.duo-tracker/logs/duo-tracker.log"; [ -f "$f" ] || { echo "No log yet ($f)."; exit 0; }
+          exec tail -n 60 -F "$f" ;;
+  journal) exec journalctl --user -u duo-tracker -f -n 50 ;;
   start)  exec systemctl --user start duo-tracker ;;
   stop)   exec systemctl --user stop duo-tracker ;;
   vnc)    ip=$(hostname -I 2>/dev/null | awk '{print $1}'); echo "Connect a VNC viewer to:  vnc://${ip:-$(hostname)}:5900"; exit 0 ;;
@@ -27,7 +29,10 @@ case "$cmd" in
 ./duo rehearse    practice checkout (never orders); arms auto-buy for 7 days
 ./duo watch       run in this terminal
 ./duo blocks      when Apple blocked checks (to tune the schedule)
-Linux service:    ./duo start | stop | status | logs | vnc
+./duo drops       every drop seen and what the bot did (--csv FILE to export)
+./duo logs        follow the log file (full error details are in it)
+./duo report      bundle logs + diagnostics into one scrubbed file to send for help
+Linux service:    ./duo start | stop | status | journal | vnc
 TXT
     exit 0 ;;
 esac

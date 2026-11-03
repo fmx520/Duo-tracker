@@ -130,6 +130,20 @@ When stock hits you'll get **🚨 iPhone Duo … IN STOCK**, then one of:
 In `alert` mode it keeps watching and pings you for each new drop. In every
 other mode it stops after acting so it doesn't fight you for the page.
 
+## Logs, drop history, and getting help
+
+| Command | Shows |
+|---|---|
+| `./duo logs` | Follows the log live. Everything lands in `~/.duo-tracker/logs/duo-tracker.log` with full error details, rotated daily, 7 days kept. Same on Linux and Mac. |
+| `./duo drops` | Every drop seen in the last 7 days (`--days 30` for more): when, store, model, how quickly it was noticed, how long it stayed, and the outcome (**ordered**, **review ready**, **needs you**, **bagged**, **add-to-bag failed**, or **alert only**). `--csv drops.csv` exports it all. |
+| `./duo blocks` | When Apple blocked checks, and at what rate. |
+| `./duo report` | Bundles config, practice-run results, blocks, drops, the last 3 checkout reports and the recent log into one file in `~/.duo-tracker/support/`. Emails, phone numbers, street addresses, card numbers, order numbers, your ntfy topic and your healthcheck URL are scrubbed. Skim it, then send it for help. |
+
+If the watcher crashes you get **💥 Duo-tracker crashed: <error>** on your
+phone. The Linux service restarts it 30 seconds later, and you'll then see
+"started" again. An unexpected error *during checkout* doesn't crash it: you
+get **⚠️ Checkout needs you NOW** with the window left open.
+
 ## Automated checkout: the limits
 
 `checkout.mode: submit` places a real order. It is built to fail safe:

@@ -27,13 +27,17 @@ log = logging.getLogger(__name__)
 BLOCKED_STATUSES = {403, 429, 503, 541}
 
 
+class NoScreenError(RuntimeError):
+    """Headless Linux with no (virtual) display: restarting won't fix it."""
+
+
 class Blocked(Exception):
     """Apple refused the page's availability request."""
 
 
 def open_context(pw: Playwright, cfg: Config) -> BrowserContext:
     if sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-        raise RuntimeError(
+        raise NoScreenError(
             "no screen for the browser. On a headless Linux box, run commands through `./duo …` "
             "after `scripts/install-linux-service.sh` (it provides a virtual screen you can VNC into), "
             "or prefix with `xvfb-run -a`.")

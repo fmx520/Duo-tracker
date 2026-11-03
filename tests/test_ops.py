@@ -147,6 +147,8 @@ def test_headless_linux_without_screen_gives_clear_error(monkeypatch, tmp_path):
         browser.open_context(None, load(p))
 
 
-def test_exit_code_for_bad_config_prevents_restart_loop(tmp_path):
+def test_exit_code_for_bad_config_prevents_restart_loop(tmp_path, monkeypatch):
+    from duo_tracker import checkout
     from duo_tracker.cli import EXIT_NO_RESTART, main
+    monkeypatch.setattr(checkout, "STATE_DIR", tmp_path / "state")
     assert main(["-c", str(tmp_path / "missing.yaml"), "watch"]) == EXIT_NO_RESTART == 3

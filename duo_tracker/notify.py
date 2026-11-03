@@ -13,7 +13,7 @@ class Notifier:
         self.url = f"{server.rstrip('/')}/{topic}" if topic else ""
 
     def send(self, title: str, message: str, *, click: str = "", urgent: bool = True, tags: str = "iphone") -> bool:
-        print(f"\n🔔 {title}\n   {message}\n")
+        log.info("🔔 %s — %s", title, message)
         if not self.url:
             return False
         headers = {

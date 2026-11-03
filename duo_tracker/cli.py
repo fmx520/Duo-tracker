@@ -12,6 +12,13 @@ from .notify import Notifier
 
 log = logging.getLogger("duo_tracker")
 
+
+def say(msg: str, level: int = logging.INFO, exc: BaseException | None = None) -> None:
+    """Screen + log file. With ``exc``, the full traceback goes to the log file only."""
+    log.log(level, msg)
+    if exc is not None:
+        log.debug("details for: %s", msg, exc_info=(type(exc), exc, exc.__traceback__))
+
 # Exit code for "won't fix itself by restarting" (bad config, order already
 # placed, no rehearsal). The systemd unit is told not to restart on it.
 EXIT_NO_RESTART = 3
@@ -172,7 +179,7 @@ def cmd_setup(args) -> int:
         page = _page(ctx)
         page.goto(BUY_URL)
         zip_hint = cfg.zip or "your ZIP"
-        print(
+        say(
             "\nA browser window opened. In it:\n"
             "  1. Sign in to your Apple Account (top-right bag icon → Sign in). Approve 2FA.\n"
             f"  2. Pick any iPhone Duo config, click 'Check availability', enter {zip_hint},\n"
@@ -181,19 +188,19 @@ def cmd_setup(args) -> int:
             "  4. Close the browser window when done.\n"
         )
         ctx.wait_for_event("close", timeout=0)
-    print(f"Saved to {cfg.profile_dir}. Next: python -m duo_tracker check")
+    say(f"Saved to {cfg.profile_dir}. Next: python -m duo_tracker check")
     return 0
 
 
 def _report(model, av, stores) -> None:
     if not av.has_pickup_data:
-        print(f"[{_ts()}] {model.name}: no store data — run `setup` and pick a store")
+        say(f"{model.name}: no store data — run `setup` and pick a store")
     else:
-        print(f"[{_ts()}] {model.name}: {len(stores)}/{len(av.stores)} stores have it"
+        say(f"{model.name}: {len(stores)}/{len(av.stores)} stores have it"
               + (f" ({', '.join(s.store_name for s in stores)})" if stores else ""))
     extra = [q for q in (av.delivery_quote, av.courier_quote if av.courier_available else "") if q]
     if extra:
-        print(f"           {' | '.join(extra)}")
+        say(f"           {' | '.join(extra)}")
 
 
 def cmd_check(args) -> int:
@@ -210,11 +217,11 @@ def cmd_check(args) -> int:
         try:
             for m, res in check_round(page, cfg.models, cfg.carrier):
                 if isinstance(res, Exception):
-                    print(f"[{_ts()}] {m.name}: error: {res}")
+                    say(f"{m.name}: error: {res}")
                 else:
                     _report(m, res, matching_stores(res, cfg.store_filter, cfg.max_miles))
         except Blocked as e:
-            print(f"[{_ts()}] Apple blocked the availability request ({e}). Try again later.")
+            say(f"Apple blocked the availability request ({e}). Try again later.")
             return 2
         finally:
             ctx.close()
@@ -233,27 +240,31 @@ def cmd_watch(args) -> int:
 
     cfg = load(args.config)
     sched = cfg.make_schedule(STATE_DIR / "blocks.csv")
+    from .drops import DropLog
+    drop_log = DropLog(STATE_DIR / "drops.jsonl")
+    open_drops: dict[str, str] = {}      # availability key -> drop id, while it's in stock
+    last_checked: dict[str, float] = {}  # part -> monotonic time of last successful check
     notifier = Notifier(cfg.ntfy_server, cfg.ntfy_topic)
     if not cfg.ntfy_topic:
-        print("warning: no ntfy.topic set — alerts will only print here.")
+        say("warning: no ntfy.topic set — alerts will only print here.")
     if cfg.checkout_mode == "submit":
         if (lock := order_lock()):
-            print(f"Refusing to auto-buy: this tool already placed an order ({lock.get('model')} at "
+            say(f"Refusing to auto-buy: this tool already placed an order ({lock.get('model')} at "
                   f"{lock.get('store')}, {lock.get('at')}). Delete ~/.duo-tracker/order.lock to allow another.")
             return EXIT_NO_RESTART
         ok, why = rehearsal_ok()
         if ok:
-            print(f"Auto-buy armed ({why}). Caps: " +
+            say(f"Auto-buy armed ({why}). Caps: " +
                   ", ".join(f"{m.key} ≤ ${cfg.cap_for(m):,.2f}" for m in cfg.models))
         else:
             # Keep watching rather than stopping: fill checkout and let you tap Place Order.
             cfg.checkout_mode = "review"
-            print(f"Auto-buy NOT armed ({why}). Watching in review mode: it fills checkout, you tap Place Order.")
+            say(f"Auto-buy NOT armed ({why}). Watching in review mode: it fills checkout, you tap Place Order.")
             notifier.send("Auto-buy not armed", f"{why}. Still watching. On a drop it fills checkout and "
                           "you tap Place Order. Run `./duo rehearse` to re-arm.", urgent=False, tags="warning")
 
     peaks = ", ".join(f"{w.label} every {w.seconds}s" for w in cfg.schedule_windows)
-    print(f"Watching {', '.join(m.key for m in cfg.models)}: every {cfg.schedule_default}s"
+    say(f"Watching {', '.join(m.key for m in cfg.models)}: every {cfg.schedule_default}s"
           + (f", faster at peak ({peaks}, {cfg.schedule_tz})" if peaks else "")
           + f". Checkout mode: {cfg.checkout_mode}. Ctrl-C to stop.")
     last_label = ""
@@ -273,7 +284,7 @@ def cmd_watch(args) -> int:
         if cfg.checkout_mode in ("review", "submit"):
             n = empty_bag(page)
             if n:
-                print(f"Emptied {n} item(s) from your bag so checkout only contains the phone.")
+                say(f"Emptied {n} item(s) from your bag so checkout only contains the phone.")
         notifier.send("Duo-tracker started", f"Watching on {socket.gethostname()} "
                       f"({', '.join(m.key for m in cfg.models)}; mode {cfg.checkout_mode}).",
                       urgent=False, tags="eyes")
@@ -285,10 +296,11 @@ def cmd_watch(args) -> int:
                         ok = signed_in(page)
                     except Exception as e:
                         ok = True  # couldn't tell; don't cry wolf
-                        print(f"[{_ts()}] sign-in check failed: {e}")
+                        say(f"sign-in check failed: {e}", logging.WARNING, exc=e)
                     if not ok and not signed_out_notified:
                         signed_out_notified = True
-                        print(f"[{_ts()}] Signed out of Apple — sign back in (VNC into the box) or checkout will stop.")
+                        say("Signed out of Apple — sign back in (VNC into the box) or checkout will stop.",
+                            logging.WARNING)
                         notifier.send("⚠️ Signed out of Apple", "Sign back in on the tracker's browser "
                                       "(VNC on the Linux box), or auto-checkout will stop at sign-in.", tags="warning")
                     elif ok and signed_out_notified:
@@ -302,7 +314,7 @@ def cmd_watch(args) -> int:
                         if isinstance(av, Exception):
                             errors_in_a_row += 1
                             health.problem(str(av))
-                            print(f"[{_ts()}] {m.name}: error: {av}")
+                            say(f"{m.name}: error: {av}", logging.WARNING, exc=av)
                             if errors_in_a_row == 5:
                                 notifier.send("Duo-tracker needs attention", f"5 errors in a row; last: {av}",
                                               urgent=False, tags="warning")
@@ -310,6 +322,9 @@ def cmd_watch(args) -> int:
                         errors_in_a_row = 0
                         health.success()
                         checked.add(m.part)
+                        prev_check = last_checked.get(m.part)
+                        last_checked[m.part] = time.monotonic()
+                        gap = None if prev_check is None else last_checked[m.part] - prev_check
                         stores = matching_stores(av, cfg.store_filter, cfg.max_miles)
                         _report(m, av, stores)
                         if not av.has_pickup_data and not warned_no_store:
@@ -325,17 +340,37 @@ def cmd_watch(args) -> int:
                             continue
 
                         health.drop()
+                        say(f"🚨 DROP: {m.name} — {'; '.join(fresh)}")
                         notifier.send(f"🚨 {m.name} IN STOCK", f"{'; '.join(fresh[:4])}. ${m.price}", click=BUY_URL)
+                        by_number = {st.store_number: st for st in stores}
+                        new_ids = {}
+                        for k, desc in keys.items():
+                            if k in live:
+                                continue
+                            num = k.split(":")[1] if k.startswith("pickup:") else ""
+                            st = by_number.get(num)
+                            new_ids[k] = drop_log.start(
+                                key=k, model=m.name, part=m.part, store=st.store_name if st else desc,
+                                store_number=num, kind="pickup" if num else "courier",
+                                notice_gap_s=gap, window=sched.current()[1])
+                        open_drops.update(new_ids)
                         fresh_stores = [st for st in stores if f"pickup:{st.store_number}:{m.part}" not in live]
                         if cfg.checkout_mode == "alert" or not fresh_stores:
-                            continue  # courier-only drops are alert-only
-                        _act_on_hit(page, cfg, notifier, m, fresh_stores)
-                        print("\nStopped watching. Browser stays open — press Ctrl-C when done.")
+                            for i in new_ids.values():  # courier-only drops are alert-only
+                                drop_log.outcome(i, "alert only")
+                            continue
+                        result = _act_on_hit(page, cfg, notifier, m, fresh_stores)
+                        for k, i in new_ids.items():
+                            if result and k == f"pickup:{result['store_number']}:{m.part}":
+                                drop_log.outcome(i, result["outcome"], result.get("detail", ""), result.get("checkout_s"))
+                            else:
+                                drop_log.outcome(i, "alert only", "another store was chosen" if result else "")
+                        say("Stopped watching. Browser stays open — press Ctrl-C when done.")
                         while True:  # keep the dead-man switch fed so it doesn't report the box down
                             time.sleep(60)
                             health.ping()
                 except Blocked as e:
-                    print(f"[{_ts()}] Apple blocked the request ({e}). Backing off {backoff // 60} min.")
+                    say(f"Apple blocked the request ({e}). Backing off {backoff // 60} min.", logging.WARNING)
                     notifier.send("Duo-tracker paused", f"Apple blocked checks ({e}). Retrying in {backoff // 60} min.",
                                   urgent=False, tags="warning")
                     health.already_notified(f"Apple blocked checks ({e})")
@@ -347,14 +382,16 @@ def cmd_watch(args) -> int:
                 backoff = cfg.blocked_backoff_seconds
                 # keep last-known state for models that errored this round, so they don't re-alert
                 live = {k: v for k, v in live.items() if k.split(":")[-1] not in checked} | now
+                for k in [k for k in open_drops if k not in live]:  # sold out since last round
+                    drop_log.end(open_drops.pop(k))
                 health.tick()
                 wait, label = sched.current()
                 if label != last_label:
                     last_label = label
-                    print(f"[{_ts()}] {label}: checking every {wait}s")
+                    say(f"{label}: checking every {wait}s")
                 sleep_with_status(wait, on_tick=health.tick)
         except KeyboardInterrupt:
-            print("\nbye")
+            say("bye")
         finally:
             try:
                 ctx.close()
@@ -363,43 +400,63 @@ def cmd_watch(args) -> int:
     return 0
 
 
-def _act_on_hit(page, cfg, notifier, model, stores) -> None:
-    """Bag the phone and, depending on mode, drive checkout to review or place the order."""
+def _act_on_hit(page, cfg, notifier, model, stores) -> dict:
+    """Bag the phone and, depending on mode, drive checkout to review or place the order.
+
+    Returns {"outcome", "detail", "checkout_s", "store_number"} for the drop history.
+    """
     from .browser import go_to_bag
     from .checkout import CheckoutStopped, Plan, format_timings, run
 
     bag_url = "https://www.apple.com/shop/bag"
-    if not go_to_bag(page):
-        notifier.send("Add to Bag failed — buy it NOW", f"{model.name}: the buy page is open with it selected.",
-                      click=BUY_URL)
-        return
-    if cfg.checkout_mode == "bag":
-        notifier.send("Finish your iPhone Duo order NOW", "It's in your bag — check out and pick up.", click=bag_url)
-        return
-
     store = min(stores, key=lambda st: st.miles if st.miles is not None else 1e9)
-    plan = Plan(model=model, fulfillment="pickup", store_number=store.store_number, store_name=store.store_name,
-                max_total=cfg.cap_for(model), submit=cfg.checkout_mode == "submit")
-    t0 = time.monotonic()
+    result = {"store_number": store.store_number, "detail": "", "checkout_s": None}
     try:
-        res = run(page, plan)
-    except CheckoutStopped as e:
-        page.bring_to_front()
-        print(f"[{_ts()}] checkout stopped at {e.step}: {e.reason}" + (f"\n           report: {e.report}" if e.report else ""))
-        if e.timings:
-            print(f"           timings: {format_timings(e.timings)}")
-        notifier.send("⚠️ Checkout needs you NOW", f"{e.reason}. Window is open at that step.", click=bag_url)
-        return
-    took = time.monotonic() - t0
-    print(f"[{_ts()}] checkout timings: {format_timings(res.timings)}")
-    if res.placed:
-        conf = f" Order {res.confirmation}." if res.confirmation else " (confirmation page not detected — check email)"
-        msg = f"{model.name}, pickup at {res.store}, total ${res.total:,.2f}.{conf} ({took:.0f}s)"
-        print(f"[{_ts()}] ✅ ORDER PLACED: {msg}")
-        notifier.send("✅ iPhone Duo ORDER PLACED", msg, click="https://www.apple.com/shop/account/home")
-    else:
+        if not go_to_bag(page):
+            say("Add to Bag failed", logging.WARNING)
+            notifier.send("Add to Bag failed — buy it NOW", f"{model.name}: the buy page is open with it selected.",
+                          click=BUY_URL)
+            return result | {"outcome": "add-to-bag failed"}
+        if cfg.checkout_mode == "bag":
+            notifier.send("Finish your iPhone Duo order NOW", "It's in your bag — check out and pick up.",
+                          click=bag_url)
+            return result | {"outcome": "bagged"}
+
+        plan = Plan(model=model, fulfillment="pickup", store_number=store.store_number,
+                    store_name=store.store_name, max_total=cfg.cap_for(model),
+                    submit=cfg.checkout_mode == "submit")
+        t0 = time.monotonic()
+        try:
+            res = run(page, plan)
+        except CheckoutStopped as e:
+            page.bring_to_front()
+            say(f"checkout stopped at {e.step}: {e.reason}" + (f" — report: {e.report}" if e.report else ""),
+                logging.WARNING)
+            if e.timings:
+                say(f"checkout timings: {format_timings(e.timings)}")
+            notifier.send("⚠️ Checkout needs you NOW", f"{e.reason}. Window is open at that step.", click=bag_url)
+            return result | {"outcome": "needs you", "detail": f"{e.step}: {e.reason}",
+                             "checkout_s": time.monotonic() - t0}
+        took = time.monotonic() - t0
+        say(f"checkout timings: {format_timings(res.timings)}")
+        if res.placed:
+            conf = f" Order {res.confirmation}." if res.confirmation else " (confirmation page not detected — check email)"
+            msg = f"{model.name}, pickup at {res.store}, total ${res.total:,.2f}.{conf} ({took:.0f}s)"
+            say(f"✅ ORDER PLACED: {msg}")
+            notifier.send("✅ iPhone Duo ORDER PLACED", msg, click="https://www.apple.com/shop/account/home")
+            return result | {"outcome": "ordered", "detail": f"${res.total:,.2f}", "checkout_s": took}
         msg = f"{model.name} at {res.store}, total ${res.total:,.2f}. Tap Place Order. ({took:.0f}s)"
+        say(f"Review page ready: {msg}")
         notifier.send("Review page ready — PLACE ORDER NOW", msg, click=bag_url)
+        return result | {"outcome": "review ready", "checkout_s": took}
+    except Exception as e:  # never let an unexpected page state kill the watcher mid-drop
+        say(f"checkout hit an unexpected error: {e}", logging.ERROR, exc=e)
+        try:
+            page.bring_to_front()
+        except Exception:
+            pass
+        notifier.send("⚠️ Checkout needs you NOW", f"Unexpected error: {str(e)[:120]}", click=bag_url)
+        return result | {"outcome": "needs you", "detail": f"error: {str(e)[:200]}"}
 
 
 def cmd_rehearse(args) -> int:
@@ -419,37 +476,37 @@ def cmd_rehearse(args) -> int:
         try:
             if not signed_in(page):
                 raise CheckoutStopped("sign-in", "not signed in to Apple — run `setup` first")
-            print("    ✔ signed in to Apple")
+            say("    ✔ signed in to Apple")
             empty_bag(page)
-            print(f"1/2 delivery rehearsal with {model.name} (stops on the review page, never orders)…")
+            say(f"1/2 delivery rehearsal with {model.name} (stops on the review page, never orders)…")
             load_buy_page(page)
             select_config(page, model, cfg.carrier)
             if not go_to_bag(page):
                 raise CheckoutStopped("buy page", "couldn't click Add to Bag")
             r = run(page, Plan(model=model, fulfillment="delivery", max_total=cfg.cap_for(model)))
             results.append(f"delivery ok, review total ${r.total:,.2f}")
-            print(f"    ✔ reached review — total ${r.total:,.2f} (cap ${cfg.cap_for(model):,.2f})")
-            print(f"      timings: {format_timings(r.timings)}")
+            say(f"    ✔ reached review — total ${r.total:,.2f} (cap ${cfg.cap_for(model):,.2f})")
+            say(f"      timings: {format_timings(r.timings)}")
 
             if args.pickup_item_url:
-                print("2/2 pickup rehearsal with the accessory you gave (stops on review)…")
+                say("2/2 pickup rehearsal with the accessory you gave (stops on review)…")
                 empty_bag(page)
                 page.goto(args.pickup_item_url, wait_until="domcontentloaded", timeout=60_000)
                 if not go_to_bag(page):
                     raise CheckoutStopped("accessory page", "couldn't click Add to Bag")
                 r = run(page, Plan(model=model, fulfillment="pickup", check_model_name=False))
                 results.append(f"pickup ok at {r.store or 'first store'}")
-                print(f"    ✔ pickup flow reached review at {r.store or 'the first store'} — total ${r.total:,.2f}")
-                print(f"      timings: {format_timings(r.timings)}")
+                say(f"    ✔ pickup flow reached review at {r.store or 'the first store'} — total ${r.total:,.2f}")
+                say(f"      timings: {format_timings(r.timings)}")
             else:
-                print("2/2 skipped pickup rehearsal (pass --pickup-item-url with any in-stock accessory to test it)")
+                say("2/2 skipped pickup rehearsal (pass --pickup-item-url with any in-stock accessory to test it)")
         except CheckoutStopped as e:
             record_rehearsal(False, str(e))
-            print(f"    ✘ stopped at {e.step}: {e.reason}")
+            say(f"    ✘ stopped at {e.step}: {e.reason}", logging.WARNING)
             if e.timings:
-                print(f"      timings: {format_timings(e.timings)}")
+                say(f"      timings: {format_timings(e.timings)}")
             if e.report:
-                print(f"      Send this file to fix the selectors: {e.report}")
+                say(f"      Send this file to fix the selectors: {e.report}")
             return 2
         finally:
             try:
@@ -458,7 +515,7 @@ def cmd_rehearse(args) -> int:
                 pass
             ctx.close()
     record_rehearsal(True, "; ".join(results))
-    print("Rehearsal passed — `checkout.mode: submit` is armed for 7 days.")
+    say("Rehearsal passed — `checkout.mode: submit` is armed for 7 days.")
     return 0
 
 
@@ -469,8 +526,43 @@ def cmd_blocks(_args) -> int:
     return 0
 
 
+def cmd_drops(args) -> int:
+    from pathlib import Path
+
+    from .checkout import STATE_DIR
+    from .drops import export_csv, summarize
+    src = STATE_DIR / "drops.jsonl"
+    if args.csv:
+        n = export_csv(src, Path(args.csv))
+        print(f"Wrote {n} drops to {args.csv}")
+        return 0
+    print(summarize(src, days=args.days))
+    return 0
+
+
+def cmd_report(args) -> int:
+    from pathlib import Path
+
+    from .checkout import STATE_DIR
+    from .report import build
+    out = build(STATE_DIR, Path(args.config))
+    print(f"Wrote {out}\nEmails, phone numbers, addresses, card numbers, order numbers and your ntfy topic "
+          "are removed. Skim it, then send it over.")
+    return 0
+
+
+def _notify_crash(config_path: str, e: BaseException) -> None:
+    try:
+        from .config import load
+        cfg = load(config_path)
+        Notifier(cfg.ntfy_server, cfg.ntfy_topic).send(
+            "💥 Duo-tracker crashed", f"{type(e).__name__}: {str(e)[:160]}. "
+            "The service restarts it in 30s; `./duo report` has the details.", urgent=False, tags="boom")
+    except Exception:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     p = argparse.ArgumentParser(prog="duo_tracker", description="Watch Apple for iPhone Duo pickup stock.")
     p.add_argument("-c", "--config", default="config.yaml")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -481,12 +573,31 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("check", help="check each model once and print results").set_defaults(fn=cmd_check)
     sub.add_parser("watch", help="keep checking; act on stock per checkout.mode").set_defaults(fn=cmd_watch)
     sub.add_parser("blocks", help="summarize when Apple blocked checks, to tune the schedule").set_defaults(fn=cmd_blocks)
+    d = sub.add_parser("drops", help="every drop seen and what the bot did about it")
+    d.add_argument("--days", type=int, default=7)
+    d.add_argument("--csv", metavar="PATH", help="export the full history as CSV instead")
+    d.set_defaults(fn=cmd_drops)
+    sub.add_parser("report", help="bundle logs + diagnostics into one scrubbed file to send for help"
+                   ).set_defaults(fn=cmd_report)
     r = sub.add_parser("rehearse", help="walk checkout to the review page without ordering (arms submit mode)")
     r.add_argument("--pickup-item-url", help="apple.com product page of any in-stock accessory, to test the pickup steps")
     r.set_defaults(fn=cmd_rehearse)
     args = p.parse_args(argv)
+    from . import checkout
+    from .logsetup import setup
+    setup(checkout.STATE_DIR if args.cmd not in ("models", "init") else None)
+    log.debug("command: %s", " ".join(sys.argv[1:] if argv is None else argv))
     try:
         return args.fn(args)
-    except (ValueError, KeyError, FileNotFoundError, RuntimeError) as e:
-        print(f"error: {e}", file=sys.stderr)
+    except Exception as e:
+        from .browser import NoScreenError
+        if not isinstance(e, (ValueError, KeyError, FileNotFoundError, NoScreenError)):
+            log.critical("crashed: %s: %s", type(e).__name__, e, exc_info=True)
+            if args.cmd == "watch":
+                _notify_crash(args.config, e)
+            return 1
+        log.error("error: %s", e)
+        log.debug("details", exc_info=True)
         return EXIT_NO_RESTART
+    except KeyboardInterrupt:
+        return 0

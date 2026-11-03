@@ -3,7 +3,9 @@
 Nothing leaves the machine: every apple.com request is answered by `route()`.
 The fake page mirrors the buy page's real hooks (data-autom radio inputs, an
 "add-to-cart" button, and a fetch to /shop/fulfillment-messages once a full
-configuration is chosen), as observed on the live page in Nov 2026.
+configuration is chosen), as observed on the live page in Nov 2026. The
+watcher additionally fetches the endpoint actively from inside the page
+(`browser.active_fetch`), which the same routing answers.
 """
 import json
 import os
@@ -58,9 +60,10 @@ def page_factory():
     with pw_api.sync_playwright() as pw:
         browser = pw.chromium.launch()
 
-        def make(status=200, display="available"):
+        def make(status=200, display="available", fail_first=0):
             ctx = browser.new_context()
             seen = []
+            calls = {"n": 0}
 
             def handle(route):
                 url = route.request.url
@@ -68,8 +71,10 @@ def page_factory():
                 if "/shop/fulfillment-messages" in url:
                     from urllib.parse import parse_qs, urlparse
                     part = parse_qs(urlparse(url).query)["parts.0"][0]
-                    if status != 200:
-                        return route.fulfill(status=status, body="")
+                    calls["n"] += 1
+                    eff = 541 if calls["n"] <= fail_first else status
+                    if eff != 200:
+                        return route.fulfill(status=eff, body="")
                     return route.fulfill(status=200, content_type="application/json", body=avail_json(part, display))
                 if url.endswith("/shop/bag"):
                     return route.fulfill(status=200, content_type="text/html", body=BAG_PAGE)
@@ -95,6 +100,9 @@ def test_in_stock_then_bag(page_factory):
     # the page's own request carried the right part and carrier
     req = next(u for u in page.seen if "fulfillment-messages" in u)
     assert "MK1J4LL/A" in req and "UNLOCKED" in req
+    # and the active in-page fetch carried the part and a cache-busting id
+    active = [u for u in page.seen if "fulfillment-messages" in u and "_=" in u]
+    assert len(active) == 1 and "MK1J4LL/A" in active[0]
 
     assert go_to_bag(page)
     assert page.url.endswith("/shop/bag")
@@ -119,7 +127,19 @@ def test_block_is_reported_not_retried(page_factory, status):
     page = page_factory(status=status)
     with pytest.raises(Blocked, match=str(status)):
         check_model(page, resolve("256gb-nightsky"), "UNLOCKED/US")
-    assert sum("fulfillment-messages" in u for u in page.seen) == 1
+    # check_model itself never retries (the round-level 541 retry is tested
+    # separately): exactly one active fetch among the requests.
+    active = [u for u in page.seen if "fulfillment-messages" in u and "_=" in u]
+    assert len(active) == 1
+
+
+def test_541_round_retries_until_challenge_clears(page_factory):
+    from duo_tracker.browser import check_round
+    page = page_factory(fail_first=2)  # first two fulfillment answers are 541, then it clears
+    [(m, av)] = list(check_round(page, [resolve("256gb-nightsky")], "UNLOCKED/US", retry_budget=60))
+    assert m.part == "MK1F4LL/A"
+    assert not isinstance(av, Exception) and av.in_stock_stores
+    assert sum("fulfillment-messages" in u for u in page.seen) >= 3
 
 
 def test_round_loads_page_once_for_many_models(page_factory):

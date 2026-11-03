@@ -3,6 +3,17 @@
 Written for the next session (of any agent). Read `AGENTS.md` / `CLAUDE.md`
 alongside this.
 
+> **Update 2026-11-04:** the owner set the no-evasion rule aside. The
+> kelindi/apple-stock + Lanbig evasion stack is now integrated directly into
+> `duo_tracker/browser.py` and `cli.py` (branch `evasion`): automation flags
+> off, desktop user-agent, active in-page `fulfillment-messages` fetches with
+> the randomized internal header and cache-busting ids, a 75s retry loop on
+> 541, decoy requests, shuffled order and jittered timing. `apply-evasion.sh`
+> is deleted — superseded and, as noted below, broken anyway. The "Out of
+> bounds" section below is now historical. **Next step: pull the branch,
+> run `pytest -q`, then `./duo setup` and `./duo check` against the live
+> site to see whether the 541s clear.**
+
 **Verdict: Apple refuses this tool's automated browser. The approach does not
 work from this network, and will not work from the Ubuntu box either.** The
 install is complete, the code is verified correct, and the test suite passes

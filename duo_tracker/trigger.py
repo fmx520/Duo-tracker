@@ -26,6 +26,19 @@ from typing import Callable, Iterator
 
 import requests
 
+
+def parse_iso(value: str) -> datetime:
+    """``datetime.fromisoformat`` that also takes a trailing ``Z``.
+
+    JavaScript's ``toISOString()`` writes ``…123Z``. Python 3.11+ parses that,
+    but 3.10 (Ubuntu 22.04's Python) raises ValueError, which would reject
+    every trigger from a JS publisher on the Linux box.
+    """
+    v = str(value).strip()
+    if v.endswith(("Z", "z")):
+        v = v[:-1] + "+00:00"
+    return datetime.fromisoformat(v)
+
 log = logging.getLogger(__name__)
 
 VERSION = 1
@@ -132,7 +145,7 @@ def validate(raw: str, *, secret: str, parts: set[str], store_allowed: Callable[
     if not (isinstance(part, str) and isinstance(store, str) and isinstance(nonce, str) and nonce):
         raise TriggerRejected("missing part, store_number or nonce")
     try:
-        seen = datetime.fromisoformat(str(p.get("seen_at")))
+        seen = parse_iso(p.get("seen_at"))
     except ValueError:
         raise TriggerRejected("bad seen_at")
     if seen.tzinfo is None:
@@ -258,7 +271,7 @@ def radar(url: str, *, secret: str, parts: set[str], store_allowed: Callable[[st
             data = r.json()
             status = data.get("status") or {}
             ok_at = status.get("last_ok_at")
-            age = (now() - datetime.fromisoformat(ok_at.replace("Z", "+00:00"))).total_seconds() if ok_at else None
+            age = (now() - parse_iso(ok_at)).total_seconds() if ok_at else None
             if age is None or age > RADAR_STALE_SECONDS:
                 yield Event("disconnected", f"radar stale (last good sweep {'never' if age is None else f'{age:.0f}s ago'})")
             else:
@@ -277,7 +290,7 @@ def radar(url: str, *, secret: str, parts: set[str], store_allowed: Callable[[st
                         continue
                     last_emit[(store, part)] = clock()
                     try:
-                        seen_at = datetime.fromisoformat(changed.replace("Z", "+00:00"))
+                        seen_at = parse_iso(changed)
                     except ValueError:
                         continue
                     yield Event("message", json.dumps(make(part, store, secret, seen_at=seen_at)), f"radar:{store}:{part}")

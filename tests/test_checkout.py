@@ -33,7 +33,8 @@ PAGE = ("<!doctype html><html><head><title>{title}</title></head><body>{body}"
 
 class FakeApple:
     def __init__(self, *, cvv=False, signin=False, tax_rate=0.08875, stores=("R095", "R001"), extra_qty=0,
-                 undo_banner=False, attach_step=False):
+                 undo_banner=False, attach_step=False, card_tiles=False):
+        self.card_tiles = card_tiles
         self.undo_banner, self.undos, self.last_removed = undo_banner, 0, None
         self.attach_step = attach_step
         self.items, self.orders = [], []
@@ -133,6 +134,13 @@ class FakeApple:
                                     "onclick=\"location.href='/shop/checkout?_s=Billing'\">Continue to Payment</button>")
         if step == "Billing":
             cvv = "<label>Security code <input autocomplete=cc-csc name=cvv value=SECRET123></label>" if self.cvv else ""
+            if self.card_tiles:  # Apple 2026: saved card listed but NOT pre-selected
+                err = "<p>Please choose a payment method.</p>" if q.get("err") else ""
+                return html("Checkout", f"""{err}<h2>How do you want to pay?</h2>
+                  <label><input type=radio name=pay value=saved> Visa 1351 10/27 Saved Card</label>
+                  <label><input type=radio name=pay value=new> New Credit or Debit Card</label>{cvv}
+                  <button onclick="location.href = document.querySelector('input[value=saved]').checked
+                    ? '/shop/checkout?_s=Review' : '/shop/checkout?_s=Billing&err=1'">Continue to Review</button>""")
             return html("Checkout", f"<h2>Payment</h2><p>Visa •••• 4242</p>{cvv}"
                                     "<button onclick=\"location.href='/shop/checkout?_s=Review'\">Continue to Review</button>")
         if step == "Review":
@@ -486,3 +494,19 @@ def test_add_to_bag_goes_through_apples_attach_page(browser):
     assert go_to_bag(page)
     assert "/shop/bag" in page.url and fake.items == [MODEL.part]
     assert "Your bag" in page.locator("body").inner_text()
+
+
+def test_checkout_selects_the_saved_card_tile(browser):
+    """Live Mac run: 'How do you want to pay?' lists Visa 1351 as a Saved Card but
+    doesn't select it; Continue -> 'Please choose a payment method.' x10."""
+    fake = FakeApple(card_tiles=True)
+    res = run(open_page(browser, fake), pickup_plan(submit=False))
+    assert not res.placed and res.total is not None
+    assert any(s.startswith("saved card") for s, _ in res.timings)
+
+
+def test_saved_card_with_security_code_still_stops(browser):
+    fake = FakeApple(card_tiles=True, cvv=True)
+    with pytest.raises(CheckoutStopped, match="security code"):
+        run(open_page(browser, fake), pickup_plan())
+    assert fake.orders == []

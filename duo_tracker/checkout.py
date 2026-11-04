@@ -457,8 +457,14 @@ def _run(page: Page, plan: Plan, mark=lambda name: None) -> Result:
             break
         if kind is None:
             _stop(page, f"step {i + 1}", "no Continue or Place Order button")
+        if _choose_saved_card(page):
+            mark(f"saved card {i + 1}")
+            guard(page, f"step {i + 1}")  # choosing the card may reveal a security-code box
         _click_and_settle(page, nxt)
         mark(f"continue {i + 1}")
+        err = _page_error(page)
+        if err:  # Apple refused to move on; retrying the same click just loops
+            _stop(page, f"step {i + 1}", f"Apple says: {err}")
     else:
         _stop(page, "review", f"didn't reach the review page in {MAX_CONTINUE_STEPS} steps")
 
@@ -511,6 +517,48 @@ def _run(page: Page, plan: Plan, mark=lambda name: None) -> Result:
                 confirmation=confirmation)
     _write_lock(lock)
     return Result(placed=True, total=total, store=store_label, confirmation=confirmation)
+
+
+PAY_PROMPT = re.compile(r"how do you want to pay|choose a payment method", re.I)
+PAGE_ERRORS = re.compile(r"please choose a payment method|please (select|enter|choose) [^.\n]{3,60}", re.I)
+
+
+def _page_error(page: Page) -> str:
+    """A blocking validation error Apple shows at the top of a checkout step."""
+    m = PAGE_ERRORS.search(body_text(page))
+    return m.group(0) if m else ""
+
+
+def _choose_saved_card(page: Page) -> bool:
+    """On "How do you want to pay?", select the saved card if none is chosen.
+
+    Apple lists the saved card as a tile ("Visa 1351 … Saved Card") but doesn't
+    pre-select it; Continue then fails with "Please choose a payment method."
+    Returns True if it selected one. Never touches card-number/CVV fields.
+    """
+    if not PAY_PROMPT.search(body_text(page)):
+        return False
+    picked = page.evaluate("""() => {
+        const tiles = [...document.querySelectorAll('label, [role=radio], li, div')]
+          .filter(e => /saved card/i.test(e.innerText || '') && (e.innerText || '').length < 200);
+        // innermost tile mentioning "Saved Card"
+        const tile = tiles.find(t => !tiles.some(o => o !== t && t.contains(o)));
+        if (!tile) return 'none';
+        let el = tile;
+        for (let i = 0; i < 6 && el; i++, el = el.parentElement) {
+          const r = el.querySelector('input[type=radio]');
+          if (r) { if (r.checked) return 'already'; r.scrollIntoView({block: 'center'}); r.click();
+                   return r.checked ? 'picked' : 'clicked'; }
+          if (el.getAttribute && el.getAttribute('role') === 'radio') {
+            if (el.getAttribute('aria-checked') === 'true') return 'already';
+            el.click(); return 'picked'; }
+        }
+        tile.click(); return 'clicked';
+    }""")
+    if picked in ("picked", "clicked"):
+        page.wait_for_timeout(600)
+        return True
+    return False
 
 
 def _choose_store(page: Page, plan: Plan) -> str:

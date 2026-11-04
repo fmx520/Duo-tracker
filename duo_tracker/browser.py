@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import os
 import random
 import secrets
@@ -80,6 +79,15 @@ class NoScreenError(RuntimeError):
 
 class Blocked(Exception):
     """Apple refused the availability request."""
+
+
+def _userns_clones_enabled() -> bool:
+    """True if unprivileged user-namespace clones are allowed (Chrome's sandbox needs
+    them). Reads the Debian/Ubuntu sysctl; defaults to True when the knob is absent."""
+    try:
+        return Path("/proc/sys/kernel/unprivileged_userns_clone").read_text().strip() == "1"
+    except Exception:
+        return True
 
 
 def _cookie_snapshot_path(cfg: Config) -> Path:
@@ -161,11 +169,21 @@ def open_context(pw: Playwright, cfg: Config) -> BrowserContext:
     # holds a signed-in Apple account and a saved card, so running it with process
     # isolation off is a poor trade. It is a local setting -- sites cannot observe
     # it either way, so this changes nothing about how we present ourselves.
+    #
+    # Linux exception: many servers disable unprivileged user-namespace clones,
+    # which the sandbox needs — Chrome then fails to launch at all. Only there,
+    # fall back to no-sandbox (still a local setting, invisible to sites) so the
+    # bot can run; fix it properly with `sudo sysctl kernel.unprivileged_userns_clone=1`.
+    sandbox = True
+    if sys.platform.startswith("linux") and not _userns_clones_enabled():
+        log.warning("kernel forbids unprivileged user namespaces — launching Chrome "
+                    "without its sandbox (sysctl kernel.unprivileged_userns_clone)")
+        sandbox = False
     kwargs = dict(
         user_data_dir=str(cfg.profile_dir),
         headless=False,
         no_viewport=True,
-        chromium_sandbox=True,
+        chromium_sandbox=sandbox,
         # kelindi: present as ordinary desktop Chrome, not automation.
         user_agent=REAL_UA,
         locale="en-US",
@@ -245,34 +263,7 @@ def _page(ctx: BrowserContext) -> Page:
 
 
 def _check(page: Page, autom: str) -> None:
-    """Select a radio on the buy page, and make sure it really took.
-
-    Apple's radios are visually hidden inputs; a forced check can fail with
-    "Element is outside of the viewport" (or silently not register -- that's how
-    AppleCare One ended up in the bag). Fall back to clicking the visible label
-    the input points at, then verify the input is actually checked.
-    """
-    inp = page.locator(f'[data-autom="{autom}"]').first
-    try:
-        inp.check(force=True, timeout=15_000)
-    except Exception as e:
-        log.debug("check(%s) failed (%s); clicking its label instead", autom, str(e).splitlines()[0])
-    if inp.is_checked():
-        return
-    labelled_by = inp.get_attribute("aria-labelledby") or ""
-    inp_id = inp.get_attribute("id") or ""
-    candidates = [f'[id="{x}"]' for x in labelled_by.split() if x] + ([f'label[for="{inp_id}"]'] if inp_id else [])
-    for sel in candidates:
-        lab = page.locator(sel).first
-        try:
-            if lab.count():
-                lab.scroll_into_view_if_needed(timeout=5_000)
-                lab.click(timeout=10_000)
-                if inp.is_checked():
-                    return
-        except Exception as e:
-            log.debug("label click %s failed: %s", sel, str(e).splitlines()[0])
-    raise RuntimeError(f"couldn't select '{autom}' on the buy page")
+    page.locator(f'[data-autom="{autom}"]').check(force=True, timeout=15_000)
 
 
 def select_config(page: Page, model: Model, carrier: str) -> None:
@@ -342,33 +333,15 @@ def check_round(page: Page, models: list[Model], carrier: str, zip_code: str = "
 
 
 def go_to_bag(page: Page) -> bool:
-    """Click Add to Bag on the buy page (``model`` already selected) and open the bag.
-
-    Apple doesn't go straight to the bag: Add to Bag sends the add request, then
-    loads an accessories page (``?step=attach``) with a "Review Bag" button.
-    Wait for that (or the bag) before moving on -- jumping to the bag the
-    instant after the click raced the add request.
-    """
-    start_url = page.url
+    """Click Add to Bag on the buy page (``model`` already selected) and open the bag."""
     try:
         page.locator('[data-autom="add-to-cart"]').click(timeout=15_000)
-    except PWTimeout:
-        page.bring_to_front()
-        return False
-    try:
-        page.wait_for_url(lambda u: u != start_url and ("step=attach" in u or "/shop/bag" in u), timeout=30_000)
+        page.wait_for_load_state("domcontentloaded", timeout=30_000)
     except PWTimeout:
         page.bring_to_front()
         return False
     if "/shop/bag" not in page.url:
-        review = page.get_by_role("link", name=re.compile(r"review bag", re.I)).or_(
-            page.get_by_role("button", name=re.compile(r"review bag", re.I))).first
-        try:
-            review.click(timeout=15_000)
-            page.wait_for_url(lambda u: "/shop/bag" in u, timeout=30_000)
-        except PWTimeout:
-            page.goto(BAG_URL, wait_until="domcontentloaded", timeout=60_000)
-    page.wait_for_load_state("domcontentloaded", timeout=30_000)
+        page.goto(BAG_URL, wait_until="domcontentloaded", timeout=60_000)
     page.bring_to_front()
     return True
 

@@ -32,7 +32,7 @@ from .catalog import BAG_URL, Model
 
 STATE_DIR = Path.home() / ".duo-tracker"
 REHEARSAL_MAX_AGE = timedelta(days=7)
-MAX_CONTINUE_STEPS = 10
+MAX_CONTINUE_STEPS = 15
 STEP_TIMEOUT_S = 15.0
 
 # ── what we look for ──────────────────────────────────────────────────────────
@@ -206,7 +206,9 @@ def save_report(page: Page, step: str, reason: str) -> Path | None:
               tag: e.tagName.toLowerCase(), type: e.type || '', name: e.name || '', id: e.id || '',
               autom: e.getAttribute('data-autom') || '', aria: e.getAttribute('aria-label') || '',
               autocomplete: e.getAttribute('autocomplete') || '',
-              text: (e.tagName === 'INPUT' || e.tagName === 'SELECT') ? '' :
+              text: (e.tagName === 'INPUT' || e.tagName === 'SELECT' ||
+                     /^form-field-/i.test(e.getAttribute('data-autom') || '') ||
+                     e.closest('[data-autom^="form-field-"], address')) ? '' :
                     (e.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 80),
             }))""")
     except Exception:
@@ -236,6 +238,13 @@ def _stop(page: Page, step: str, reason: str):
     raise CheckoutStopped(step, reason, save_report(page, step, reason))
 
 
+def _title(page: Page) -> str:
+    try:
+        return page.title()
+    except Exception:
+        return ""
+
+
 def _click_and_settle(page: Page, el: Locator, *, advances: bool = True) -> None:
     """Click, then wait only as long as the page actually needs.
 
@@ -246,6 +255,7 @@ def _click_and_settle(page: Page, el: Locator, *, advances: bool = True) -> None
     the next button, which is the real readiness signal.
     """
     url = page.url
+    title = _title(page)
     el.click(timeout=10_000)
     if not advances:
         page.wait_for_timeout(120)
@@ -253,7 +263,9 @@ def _click_and_settle(page: Page, el: Locator, *, advances: bool = True) -> None
     deadline = time.monotonic() + 6
     while time.monotonic() < deadline:
         try:
-            if page.url != url or not el.is_visible():
+            # Apple's checkout keeps one URL and one Continue button across steps;
+            # the page title ("Shipping…", "Payment Details…") is what changes.
+            if page.url != url or not el.is_visible() or _title(page) != title:
                 break
         except Exception:
             break  # element detached: page moved on
@@ -450,6 +462,7 @@ def _run(page: Page, plan: Plan, mark=lambda name: None) -> Result:
     mark("fulfillment")
 
     # 3. Click through Continue… until the review page
+    stuck = 0
     for i in range(MAX_CONTINUE_STEPS):
         guard(page, f"step {i + 1}")
         kind, nxt = find_first(page, {"place": PLACE_ORDER_BTN, "continue": CONTINUE_BTN})
@@ -460,8 +473,12 @@ def _run(page: Page, plan: Plan, mark=lambda name: None) -> Result:
         if _choose_saved_card(page):
             mark(f"saved card {i + 1}")
             guard(page, f"step {i + 1}")  # choosing the card may reveal a security-code box
+        before = (page.url, _title(page))
         _click_and_settle(page, nxt)
         mark(f"continue {i + 1}")
+        stuck = stuck + 1 if (page.url, _title(page)) == before else 0
+        if stuck >= 2:
+            _stop(page, f"step {i + 1}", f"Apple stayed on '{before[1]}' after Continue twice")
         err = _page_error(page)
         if err:  # Apple refused to move on; retrying the same click just loops
             _stop(page, f"step {i + 1}", f"Apple says: {err}")
@@ -529,19 +546,45 @@ def _page_error(page: Page) -> str:
     return m.group(0) if m else ""
 
 
+SAVED_CARD_RADIO = '[data-autom="checkout-billingOptions-SAVED_CARD"]'
+
+
 def _choose_saved_card(page: Page) -> bool:
     """On "How do you want to pay?", select the saved card if none is chosen.
 
-    Apple lists the saved card as a tile ("Visa 1351 … Saved Card") but doesn't
-    pre-select it; Continue then fails with "Please choose a payment method."
-    Returns True if it selected one. Never touches card-number/CVV fields.
+    Apple lists it (radio data-autom="checkout-billingOptions-SAVED_CARD", label
+    "<id>_label": "Visa 1351 … Saved Card") but doesn't pre-select it, and the
+    radio is visually hidden, so: click its label, fall back to a DOM click,
+    and verify it's checked. Returns True if it selected the card. Never
+    touches card-number/CVV fields.
     """
     if not PAY_PROMPT.search(body_text(page)):
         return False
+    radio = page.locator(SAVED_CARD_RADIO).first
+    if radio.count():
+        if radio.is_checked():
+            return False
+        rid = radio.get_attribute("id") or ""
+        for how in ("label", "dom", "force"):
+            try:
+                if how == "label" and rid:
+                    lab = page.locator(f'[id="{rid}_label"], label[for="{rid}"]').first
+                    lab.scroll_into_view_if_needed(timeout=5_000)
+                    lab.click(timeout=5_000)
+                elif how == "dom":
+                    radio.evaluate("e => { e.scrollIntoView({block: 'center'}); e.click(); }")
+                elif how == "force":
+                    radio.check(force=True, timeout=5_000)
+            except Exception:
+                continue
+            page.wait_for_timeout(500)
+            if radio.is_checked():
+                return True
+        _stop(page, "payment", "couldn't select your saved card")
+    # Older/unknown layout: the innermost element mentioning "Saved Card".
     picked = page.evaluate("""() => {
         const tiles = [...document.querySelectorAll('label, [role=radio], li, div')]
           .filter(e => /saved card/i.test(e.innerText || '') && (e.innerText || '').length < 200);
-        // innermost tile mentioning "Saved Card"
         const tile = tiles.find(t => !tiles.some(o => o !== t && t.contains(o)));
         if (!tile) return 'none';
         let el = tile;
@@ -549,9 +592,6 @@ def _choose_saved_card(page: Page) -> bool:
           const r = el.querySelector('input[type=radio]');
           if (r) { if (r.checked) return 'already'; r.scrollIntoView({block: 'center'}); r.click();
                    return r.checked ? 'picked' : 'clicked'; }
-          if (el.getAttribute && el.getAttribute('role') === 'radio') {
-            if (el.getAttribute('aria-checked') === 'true') return 'already';
-            el.click(); return 'picked'; }
         }
         tile.click(); return 'clicked';
     }""")

@@ -134,13 +134,21 @@ class FakeApple:
                                     "onclick=\"location.href='/shop/checkout?_s=Billing'\">Continue to Payment</button>")
         if step == "Billing":
             cvv = "<label>Security code <input autocomplete=cc-csc name=cvv value=SECRET123></label>" if self.cvv else ""
-            if self.card_tiles:  # Apple 2026: saved card listed but NOT pre-selected
+            if self.card_tiles:  # Apple 2026: saved card listed but NOT pre-selected, radio hidden
                 err = "<p>Please choose a payment method.</p>" if q.get("err") else ""
-                return html("Checkout", f"""{err}<h2>How do you want to pay?</h2>
-                  <label><input type=radio name=pay value=saved> Visa 1351 10/27 Saved Card</label>
-                  <label><input type=radio name=pay value=new> New Credit or Debit Card</label>{cvv}
-                  <button onclick="location.href = document.querySelector('input[value=saved]').checked
-                    ? '/shop/checkout?_s=Review' : '/shop/checkout?_s=Billing&err=1'">Continue to Review</button>""")
+                rid = "checkout.billing.billingoptions.saved_card"
+                return route.fulfill(status=200, content_type="text/html", body=f"""<!doctype html><html>
+                  <head><title>Payment Details — Secure Checkout</title></head><body>{err}
+                  <h2>How do you want to pay?</h2>
+                  <input type=radio name=pay id="{rid}" data-autom="checkout-billingOptions-SAVED_CARD"
+                         style="position:absolute; opacity:0; width:0; height:0">
+                  <label id="{rid}_label" for="{rid}">Visa 1351 10/27 Saved Card</label>
+                  <span data-autom="form-field-street">1 Private Road</span>
+                  <input type=radio name=pay data-autom="checkout-billingOptions-CREDIT"> New Credit or Debit Card{cvv}
+                  <button data-autom="continue-button-review" onclick="location.href =
+                    document.querySelector('[data-autom=checkout-billingOptions-SAVED_CARD]').checked
+                    ? '/shop/checkout?_s=Review' : '/shop/checkout?_s=Billing&err=1'">Continue</button>
+                  </body></html>""")
             return html("Checkout", f"<h2>Payment</h2><p>Visa •••• 4242</p>{cvv}"
                                     "<button onclick=\"location.href='/shop/checkout?_s=Review'\">Continue to Review</button>")
         if step == "Review":
@@ -510,3 +518,25 @@ def test_saved_card_with_security_code_still_stops(browser):
     with pytest.raises(CheckoutStopped, match="security code"):
         run(open_page(browser, fake), pickup_plan())
     assert fake.orders == []
+
+
+def test_reports_never_record_form_field_contents(browser):
+    from duo_tracker.checkout import save_report
+    page = open_page(browser, FakeApple(card_tiles=True))
+    page.goto("https://www.apple.com/shop/checkout?_s=Billing")
+    report = save_report(page, "payment", "test").read_text()
+    assert "1 Private Road" not in report and "form-field-street" in report
+
+
+def test_checkout_stops_if_apple_wont_advance(browser):
+    """Same title twice after Continue = stuck; stop instead of burning every step."""
+    from duo_tracker import checkout as co
+    fake = FakeApple(card_tiles=True)
+    page = open_page(browser, fake)
+    orig = co._choose_saved_card
+    co._choose_saved_card = lambda p: False   # simulate the card never getting selected
+    try:
+        with pytest.raises(CheckoutStopped, match="Please choose a payment method|stayed on 'Payment Details"):
+            run(page, pickup_plan(submit=False))
+    finally:
+        co._choose_saved_card = orig

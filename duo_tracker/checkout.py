@@ -208,7 +208,10 @@ def save_report(page: Page, step: str, reason: str) -> Path | None:
               autocomplete: e.getAttribute('autocomplete') || '',
               text: (e.tagName === 'INPUT' || e.tagName === 'SELECT' ||
                      /^form-field-/i.test(e.getAttribute('data-autom') || '') ||
-                     e.closest('[data-autom^="form-field-"], address')) ? '' :
+                     e.closest('[data-autom^="form-field-"], address') ||
+                     (e.tagName === 'LABEL' && e.control &&
+                      /address|contact|phone|email|name/i.test((e.control.name || '') + ' ' +
+                        (e.control.getAttribute('data-autom') || '')))) ? '' :
                     (e.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 80),
             }))""")
     except Exception:
@@ -217,8 +220,12 @@ def save_report(page: Page, step: str, reason: str) -> Path | None:
     reports.mkdir(parents=True, exist_ok=True)
     path = reports / f"{datetime.now():%Y%m%d-%H%M%S}-{re.sub(r'[^a-z0-9]+', '-', step.lower())}.json"
     url = page.url.split("?")[0]
-    path.write_text(json.dumps({"step": step, "reason": reason, "url": url, "title": page.title(),
-                                "controls": controls}, indent=1))
+    from .report import scrub  # same scrubbing as `./duo report`: addresses, emails, phones…
+    for ctl in controls:
+        if re.search(r"address|edit", ctl.get("aria", ""), re.I):
+            ctl["aria"] = re.sub(r"(?i)(address for|for)\s+.*$", r"\1 <redacted>", ctl["aria"])
+    path.write_text(scrub(json.dumps({"step": step, "reason": reason, "url": url, "title": page.title(),
+                                      "controls": controls}, indent=1)))
     return path
 
 
@@ -473,11 +480,15 @@ def _run(page: Page, plan: Plan, mark=lambda name: None) -> Result:
         if _choose_saved_card(page):
             mark(f"saved card {i + 1}")
             guard(page, f"step {i + 1}")  # choosing the card may reveal a security-code box
+        if _confirm_dialog(page):
+            mark(f"confirmed dialog {i + 1}")
+            stuck = 0
+            continue
         before = (page.url, _title(page))
         _click_and_settle(page, nxt)
         mark(f"continue {i + 1}")
         stuck = stuck + 1 if (page.url, _title(page)) == before else 0
-        if stuck >= 2:
+        if stuck >= 4:
             _stop(page, f"step {i + 1}", f"Apple stayed on '{before[1]}' after Continue twice")
         err = _page_error(page)
         if err:  # Apple refused to move on; retrying the same click just loops
@@ -534,6 +545,36 @@ def _run(page: Page, plan: Plan, mark=lambda name: None) -> Result:
                 confirmation=confirmation)
     _write_lock(lock)
     return Result(placed=True, total=total, store=store_label, confirmation=confirmation)
+
+
+DIALOG_CONFIRM = re.compile(r"^\s*(use (this|the suggested|suggested|entered|recommended) address|"
+                            r"confirm( address)?|continue|ok|done)\s*$", re.I)
+
+
+def _confirm_dialog(page: Page) -> bool:
+    """Click the confirm button of an open modal (e.g. Apple's address check).
+
+    Apple can answer "Continue to Payment" with an address-confirmation dialog;
+    pressing the page's Continue again just re-opens it.
+    """
+    dialogs = page.locator('[role="dialog"], [aria-modal="true"], dialog[open]')
+    try:
+        n = dialogs.count()
+    except Exception:
+        return False
+    for i in range(min(n, 3)):
+        d = dialogs.nth(i)
+        try:
+            if not d.is_visible():
+                continue
+            btn = d.get_by_role("button", name=DIALOG_CONFIRM).first
+            if btn.count() and btn.is_visible():
+                btn.click(timeout=5_000)
+                page.wait_for_timeout(800)
+                return True
+        except Exception:
+            continue
+    return False
 
 
 PAY_PROMPT = re.compile(r"how do you want to pay|choose a payment method", re.I)

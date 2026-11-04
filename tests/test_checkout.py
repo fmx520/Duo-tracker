@@ -33,7 +33,8 @@ PAGE = ("<!doctype html><html><head><title>{title}</title></head><body>{body}"
 
 class FakeApple:
     def __init__(self, *, cvv=False, signin=False, tax_rate=0.08875, stores=("R095", "R001"), extra_qty=0,
-                 undo_banner=False, attach_step=False, card_tiles=False):
+                 undo_banner=False, attach_step=False, card_tiles=False, addr_dialog=False):
+        self.addr_dialog = addr_dialog
         self.card_tiles = card_tiles
         self.undo_banner, self.undos, self.last_removed = undo_banner, 0, None
         self.attach_step = attach_step
@@ -130,6 +131,15 @@ class FakeApple:
                                     " onclick=\"location.href='/shop/checkout?_s=Billing'\">Continue to Payment</button>")
         if step == "Shipping":
             self.store = None
+            if self.addr_dialog:  # Apple: Continue opens an address check; only its button advances
+                return html("Checkout", """<h2>Where should we send it?</h2>
+                  <label><input type=radio name=addressSelectorButtons data-autom=saved-address checked>
+                    jane doe 25 Main Street Default</label>
+                  <button aria-label="Edit address for 25 Main Street">Edit this address</button>
+                  <button data-autom=shipping-continue-button onclick="document.getElementById('dlg').hidden=false">
+                    Continue to Payment</button>
+                  <div id=dlg role=dialog hidden><p>We couldn't verify this address.</p>
+                    <button onclick="location.href='/shop/checkout?_s=Billing'">Use this address</button></div>""")
             return html("Checkout", "<h2>Where should we send it?</h2><button "
                                     "onclick=\"location.href='/shop/checkout?_s=Billing'\">Continue to Payment</button>")
         if step == "Billing":
@@ -540,3 +550,19 @@ def test_checkout_stops_if_apple_wont_advance(browser):
             run(page, pickup_plan(submit=False))
     finally:
         co._choose_saved_card = orig
+
+
+def test_address_confirmation_dialog_is_confirmed(browser):
+    """Live run: stuck on 'Shipping Details' -- Continue opens an address check whose
+    own button advances; pressing the page's Continue again just reopens it."""
+    fake = FakeApple(addr_dialog=True)
+    res = run(open_page(browser, fake), Plan(model=MODEL, fulfillment="delivery", max_total=3000))
+    assert not res.placed and any(s.startswith("confirmed dialog") for s, _ in res.timings)
+
+
+def test_step_reports_hide_saved_address_labels(browser):
+    from duo_tracker.checkout import save_report
+    page = open_page(browser, FakeApple(addr_dialog=True))
+    page.goto("https://www.apple.com/shop/checkout?_s=Shipping")
+    rep = save_report(page, "shipping", "test").read_text()
+    assert "25 Main Street" not in rep and "jane doe" not in rep and "saved-address" in rep

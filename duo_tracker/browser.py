@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import os
 import random
 import secrets
@@ -263,7 +264,34 @@ def _page(ctx: BrowserContext) -> Page:
 
 
 def _check(page: Page, autom: str) -> None:
-    page.locator(f'[data-autom="{autom}"]').check(force=True, timeout=15_000)
+    """Select a radio on the buy page, and make sure it really took.
+
+    Apple's radios are visually hidden inputs; a forced check can fail with
+    "Element is outside of the viewport" (or silently not register -- that's how
+    AppleCare One ended up in the bag). Fall back to clicking the visible label
+    the input points at, then verify the input is actually checked.
+    """
+    inp = page.locator(f'[data-autom="{autom}"]').first
+    try:
+        inp.check(force=True, timeout=15_000)
+    except Exception as e:
+        log.debug("check(%s) failed (%s); clicking its label instead", autom, str(e).splitlines()[0])
+    if inp.is_checked():
+        return
+    labelled_by = inp.get_attribute("aria-labelledby") or ""
+    inp_id = inp.get_attribute("id") or ""
+    candidates = [f'[id="{x}"]' for x in labelled_by.split() if x] + ([f'label[for="{inp_id}"]'] if inp_id else [])
+    for sel in candidates:
+        lab = page.locator(sel).first
+        try:
+            if lab.count():
+                lab.scroll_into_view_if_needed(timeout=5_000)
+                lab.click(timeout=10_000)
+                if inp.is_checked():
+                    return
+        except Exception as e:
+            log.debug("label click %s failed: %s", sel, str(e).splitlines()[0])
+    raise RuntimeError(f"couldn't select '{autom}' on the buy page")
 
 
 def select_config(page: Page, model: Model, carrier: str) -> None:
@@ -333,15 +361,33 @@ def check_round(page: Page, models: list[Model], carrier: str, zip_code: str = "
 
 
 def go_to_bag(page: Page) -> bool:
-    """Click Add to Bag on the buy page (``model`` already selected) and open the bag."""
+    """Click Add to Bag on the buy page (``model`` already selected) and open the bag.
+
+    Apple doesn't go straight to the bag: Add to Bag sends the add request, then
+    loads an accessories page (``?step=attach``) with a "Review Bag" button.
+    Wait for that (or the bag) before moving on -- jumping to the bag the
+    instant after the click raced the add request.
+    """
+    start_url = page.url
     try:
         page.locator('[data-autom="add-to-cart"]').click(timeout=15_000)
-        page.wait_for_load_state("domcontentloaded", timeout=30_000)
+    except PWTimeout:
+        page.bring_to_front()
+        return False
+    try:
+        page.wait_for_url(lambda u: u != start_url and ("step=attach" in u or "/shop/bag" in u), timeout=30_000)
     except PWTimeout:
         page.bring_to_front()
         return False
     if "/shop/bag" not in page.url:
-        page.goto(BAG_URL, wait_until="domcontentloaded", timeout=60_000)
+        review = page.get_by_role("link", name=re.compile(r"review bag", re.I)).or_(
+            page.get_by_role("button", name=re.compile(r"review bag", re.I))).first
+        try:
+            review.click(timeout=15_000)
+            page.wait_for_url(lambda u: "/shop/bag" in u, timeout=30_000)
+        except PWTimeout:
+            page.goto(BAG_URL, wait_until="domcontentloaded", timeout=60_000)
+    page.wait_for_load_state("domcontentloaded", timeout=30_000)
     page.bring_to_front()
     return True
 

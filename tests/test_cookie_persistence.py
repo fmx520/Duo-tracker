@@ -50,10 +50,7 @@ def test_save_makes_session_cookie_persistent(browser_inst, tmp_path):
 def test_restore_injects_snapshot_and_preserves_existing(browser_inst, tmp_path):
     cfg = FakeCfg(tmp_path / "prof")
     cfg.profile_dir.mkdir()
-    (tmp_path / "cookies.json").write_text(json.loads(json.dumps([
-        {"name": "aa", "value": "sess", "domain": ".idmsa.apple.com", "path": "/", "expires": 2000000000},
-        {"name": "s_fid", "value": "stale", "domain": ".apple.com", "path": "/", "expires": 2000000000},
-    ])) and json.dumps([
+    (tmp_path / "cookies.json").write_text(json.dumps([
         {"name": "aa", "value": "sess", "domain": ".idmsa.apple.com", "path": "/", "expires": 2000000000},
         {"name": "s_fid", "value": "stale", "domain": ".apple.com", "path": "/", "expires": 2000000000},
     ]))
@@ -61,8 +58,10 @@ def test_restore_injects_snapshot_and_preserves_existing(browser_inst, tmp_path)
     # existing fresh value for s_fid must win over the stale snapshot
     ctx.add_cookies([{"name": "s_fid", "value": "fresh", "domain": ".apple.com", "path": "/"}])
     browser._restore_cookies(ctx, cfg)
-    byname = {c["name"]: c for c in ctx.cookies("https://www.apple.com")}
-    assert byname["s_fid"]["value"] == "fresh"
+    cookies = {c["name"]: c["value"] for c in ctx.cookies("https://www.apple.com")}
+    idmsa = {c["name"]: c["value"] for c in ctx.cookies("https://idmsa.apple.com")}
+    assert idmsa.get("aa") == "sess"           # injected
+    assert cookies.get("s_fid") == "fresh"      # not clobbered
     ctx.close()
 
 

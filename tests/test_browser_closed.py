@@ -89,26 +89,11 @@ def _rehearse_env(monkeypatch, tmp_path, signed_seq, tty=True):
     return cfgp, reached
 
 
-def test_rehearse_asks_instead_of_stopping_when_check_says_signed_out(state, tmp_path, monkeypatch):
-    """Apple re-prompts for a password on the account page even for a signed-in,
-    recognised user; rehearse must ask the person, not stop and close the window."""
-    cfgp, reached = _rehearse_env(monkeypatch, tmp_path, [False])
-    prompts = []
-    monkeypatch.setattr("builtins.input", lambda msg="": prompts.append(msg) or "")
-    with pytest.raises(SystemExit, match="reached buy page"):   # carried on past sign-in
-        cli.cmd_rehearse(types.SimpleNamespace(config=str(cfgp), pickup_item_url=None))
-    assert len(prompts) == 1 and "Press Enter" in prompts[0]
-
-
-def test_rehearse_signed_in_does_not_prompt(state, tmp_path, monkeypatch):
-    cfgp, _ = _rehearse_env(monkeypatch, tmp_path, [True])
-    monkeypatch.setattr("builtins.input", lambda msg="": pytest.fail("no prompt when the check passes"))
+@pytest.mark.parametrize("signed", [True, False])
+def test_rehearse_never_prompts_and_carries_on(state, tmp_path, monkeypatch, signed):
+    """The account page's re-confirm prompt mustn't stop rehearse or ask the
+    person anything; checkout itself reveals whether Apple wants a password."""
+    cfgp, _ = _rehearse_env(monkeypatch, tmp_path, [signed])
+    monkeypatch.setattr("builtins.input", lambda msg="": pytest.fail("rehearse must not prompt"))
     with pytest.raises(SystemExit, match="reached buy page"):
         cli.cmd_rehearse(types.SimpleNamespace(config=str(cfgp), pickup_item_url=None))
-
-
-def test_rehearse_without_a_terminal_still_stops_at_sign_in(state, tmp_path, monkeypatch):
-    cfgp, _ = _rehearse_env(monkeypatch, tmp_path, [False], tty=False)
-    monkeypatch.setattr("builtins.input", lambda msg="": pytest.fail("must not prompt without a TTY"))
-    assert cli.cmd_rehearse(types.SimpleNamespace(config=str(cfgp), pickup_item_url=None)) == 2
-    assert "failed" in checkout.rehearsal_ok()[1]

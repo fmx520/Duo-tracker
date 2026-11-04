@@ -822,32 +822,6 @@ def cmd_trigger_send(args) -> int:
     return 0
 
 
-def _sign_in_here(page, input_fn=None) -> None:
-    """The account-page check says "not signed in". Ask the person instead of
-    stopping and closing the window.
-
-    Apple can show a password prompt on the account page even for a recognised,
-    signed-in user (it re-confirms before sensitive pages), so this check can't
-    tell "signed out" from "re-confirm". The person can: sign in if asked, or
-    just press Enter if they're already signed in. If checkout itself later
-    demands a password, its guard stops safely and says so.
-
-    Without a terminal (the background service), it still stops.
-    """
-    from .checkout import CheckoutStopped
-    if not sys.stdin.isatty():
-        raise CheckoutStopped("sign-in", "not signed in to Apple — run `./duo setup` and sign in")
-    try:
-        page.bring_to_front()
-    except Exception:
-        pass
-    say("Apple showed a sign-in prompt in the bot's window. If you're already signed in (your name shows), "
-        "just press Enter. Otherwise sign in there first: Continue with Password → password → approve 2FA.")
-    (input_fn or input)("Press Enter to continue… ")
-    if page.is_closed():
-        raise CheckoutStopped("sign-in", "the bot's Chrome window was closed — leave it open and rerun")
-
-
 def cmd_rehearse(args) -> int:
     """Walk the full checkout without placing anything; arms `submit` mode on success."""
     from playwright.sync_api import sync_playwright
@@ -863,9 +837,13 @@ def cmd_rehearse(args) -> int:
         ctx = open_context(pw, cfg)
         page = _page(ctx)
         try:
-            if not signed_in(page):
-                _sign_in_here(page)  # raises CheckoutStopped if it can't be done interactively
-            say("    ✔ signed in to Apple")
+            if signed_in(page):
+                say("    ✔ signed in to Apple")
+            else:
+                # Apple re-prompts on the account page even for recognised users, so
+                # this check can't decide. Don't ask anyone: attempt checkout and let
+                # it show whether Apple demands a password along the way.
+                say("    ? Apple's account page asked to re-confirm; trying checkout anyway to see if it does too")
             save_cookies(ctx, cfg)  # snapshot the live session before anything can crash
             empty_bag(page)
             _require_open(page)  # empty_bag skips quietly if the window was closed; don't carry on blind
@@ -895,6 +873,10 @@ def cmd_rehearse(args) -> int:
         except CheckoutStopped as e:
             record_rehearsal(False, str(e))
             say(f"    ✘ stopped at {e.step}: {e.reason}", logging.WARNING)
+            if "sign in" in e.reason.lower():
+                say("    VERDICT: Apple asks for your password during checkout, so hands-off buying isn't possible "
+                    "right now. Use `checkout.mode: review` and tap Place Order over VNC when your phone pings.",
+                    logging.WARNING)
             if e.timings:
                 say(f"      timings: {format_timings(e.timings)}")
             if e.report:
@@ -907,7 +889,7 @@ def cmd_rehearse(args) -> int:
                 pass
             ctx.close()
     record_rehearsal(True, "; ".join(results))
-    say("Rehearsal passed — `checkout.mode: submit` is armed for 7 days.")
+    say("Rehearsal passed — VERDICT: checkout runs hands-off. `checkout.mode: submit` is armed for 7 days.")
     return 0
 
 

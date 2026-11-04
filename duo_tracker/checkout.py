@@ -558,7 +558,39 @@ SIGNIN_FIELDS = ('input[type="password"], input[name="accountName"], '
                  'input[id*="account_name" i], #remember-me')
 
 
-def signed_in(page: Page) -> bool:
+SIGNIN_PROMPT_TEXT = re.compile(r"sign in to (the )?apple store|continue with password|sign in with passkey", re.I)
+
+
+def _signin_prompt(page: Page, on_signin_url: bool) -> bool:
+    """Is a real sign-in prompt showing?
+
+    Apple's form is an idmsa.apple.com iframe, and its first step shows only the
+    remembered email/phone plus "Continue with Password" -- no password box --
+    so main-page field checks alone miss it.
+    """
+    if _visible(page, SIGNIN_FIELDS):
+        return True
+    for f in page.frames[1:]:
+        try:
+            if "idmsa.apple.com" in (f.url or "") and on_signin_url:
+                return True
+            if f.locator(SIGNIN_FIELDS).count():
+                return True
+        except Exception:
+            pass
+    if on_signin_url:
+        try:
+            btn = page.get_by_role("button", name=re.compile(r"continue with password|sign in with passkey", re.I))
+            if any(btn.nth(i).is_visible() for i in range(min(btn.count(), 3))):
+                return True
+        except Exception:
+            pass
+        if SIGNIN_PROMPT_TEXT.search(body_text(page)):
+            return True
+    return False
+
+
+def signed_in(page: Page, settle_seconds: float = 25) -> bool:
     """Load your Apple Store account page; False only if Apple leaves you at a
     real sign-in prompt.
 
@@ -569,7 +601,7 @@ def signed_in(page: Page) -> bool:
     credential form is actually on the page.
     """
     page.goto(ACCOUNT_URL, wait_until="domcontentloaded", timeout=60_000)
-    deadline = time.monotonic() + 25
+    deadline = time.monotonic() + settle_seconds
     while time.monotonic() < deadline:
         try:
             url = page.url.lower()
@@ -577,8 +609,8 @@ def signed_in(page: Page) -> bool:
             page.wait_for_timeout(500)
             continue
         if any(h in url for h in SIGNIN_HINTS):
-            # Sign-in host/path: only signed out if it STAYS here with a form.
-            if _visible(page, SIGNIN_FIELDS):
+            # Sign-in host/path: signed out if a real prompt is showing here.
+            if _signin_prompt(page, on_signin_url=True):
                 return False
             page.wait_for_timeout(500)
             continue
@@ -586,9 +618,15 @@ def signed_in(page: Page) -> bool:
             return True
         # Some other apple.com page: a credential form means signed out;
         # otherwise give the redirect another beat to finish.
-        if _visible(page, SIGNIN_FIELDS):
+        if _signin_prompt(page, on_signin_url=False):
             return False
         page.wait_for_timeout(500)
-    # Timed out mid-redirect: treat "no credential form anywhere" as signed in,
-    # matching the watcher's don't-cry-wolf rule.
-    return not _visible(page, SIGNIN_FIELDS)
+    # Out of time. Still parked on a sign-in URL = signed out: a signed-in
+    # session passes through it in a second or two, it doesn't stay. Elsewhere,
+    # no prompt = signed in (the watcher's don't-cry-wolf rule).
+    try:
+        if any(h in page.url.lower() for h in SIGNIN_HINTS):
+            return False
+    except Exception:
+        pass
+    return not _signin_prompt(page, on_signin_url=False)

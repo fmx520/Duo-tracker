@@ -6,6 +6,7 @@ the bot's LOGIC and safety stops; it can't prove Apple's real selectors — that
 what `python -m duo_tracker rehearse` is for.
 """
 import json
+import time
 import os
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlparse
@@ -417,3 +418,50 @@ def test_empty_bag_never_clicks_undo(browser):
     assert empty_bag(page) == 2
     assert fake.items == [] and fake.undos == 0
     assert empty_bag(page) == 0 and fake.undos == 0   # already empty: nothing to click, no Undo
+
+
+def _apple_signin_route(*, signed_in: bool, iframe: bool = True, blank: bool = False):
+    """Apple's 2026 flow. Signed out: /shop/account/home -> /shop/signIn/account?ssi=…
+    which shows 'Sign in to Apple Store' with the form in an idmsa.apple.com
+    iframe; step one shows only the remembered email/phone + 'Continue with
+    Password' (no password box). Signed in: the same sign-in URL is passed
+    THROUGH and forwards to the account page."""
+    def handle(route):
+        u = urlparse(route.request.url)
+        html = lambda b: route.fulfill(status=200, content_type="text/html", body=b)  # noqa: E731
+        if u.netloc == "idmsa.apple.com":
+            return html("<input id='account_name_text_field' value='+1 (555) 010-0000'>"
+                        "<button>Continue with Password</button><button>Sign in with Passkey</button>")
+        if u.path == "/shop/account/home":
+            if signed_in and "ok" in u.query:
+                return html("<h1>Your Account</h1>")
+            return html("<script>location.replace('/shop/signIn/account?ssi=abc')</script>")
+        if u.path == "/shop/signIn/account":
+            if signed_in:
+                return html("<script>setTimeout(() => location.replace('/shop/account/home?ok=1'), 300)</script>")
+            if blank:
+                return html("<div></div>")
+            frame = "<iframe src='https://idmsa.apple.com/appleauth/auth/signin'></iframe>" if iframe else (
+                "<button>Continue with Password</button><button>Sign in with Passkey</button>")
+            return html(f"<h1>Sign in to Apple Store</h1>{frame}")
+        return html("<h1>x</h1>")
+    return handle
+
+
+@pytest.mark.parametrize("kind", ["iframe", "buttons-only", "blank-but-stuck"])
+def test_apple_two_step_signin_page_means_signed_out(browser, kind):
+    """The false positive that let rehearse print '✔ signed in' on the sign-in page."""
+    from duo_tracker.checkout import signed_in
+    ctx = browser.new_context()
+    ctx.route("**/*", _apple_signin_route(signed_in=False, iframe=kind == "iframe", blank=kind == "blank-but-stuck"))
+    t0 = time.monotonic()
+    assert signed_in(ctx.new_page(), settle_seconds=3) is False
+    if kind != "blank-but-stuck":
+        assert time.monotonic() - t0 < 3      # recognised the prompt; didn't wait out the clock
+
+
+def test_signed_in_session_passing_through_signin_url_is_signed_in(browser):
+    from duo_tracker.checkout import signed_in
+    ctx = browser.new_context()
+    ctx.route("**/*", _apple_signin_route(signed_in=True))
+    assert signed_in(ctx.new_page(), settle_seconds=5) is True

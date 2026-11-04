@@ -33,6 +33,7 @@ import random
 import secrets
 import sys
 import time
+from pathlib import Path
 
 from playwright.sync_api import BrowserContext, Page, Playwright, TimeoutError as PWTimeout
 
@@ -59,6 +60,14 @@ RETRY_BUDGET_SECONDS = 75
 # How often (in watch rounds) to mix in a decoy request for a model we don't want.
 DECOY_EVERY_ROUNDS = 10
 
+# Cookies we keep alive across browser restarts. Apple marks its auth/session
+# cookies as session-only (no expiry), so Chrome deletes them on exit and every
+# run starts signed out of checkout. We snapshot them on close and re-inject
+# them with a real expiry at launch, so the login survives. Session cookies
+# only -- we deliberately do NOT capture anything else.
+_COOKIE_SNAPSHOT = "cookies.json"
+_SESSION_COOKIE_MAX_AGE_DAYS = 30
+
 
 class NoScreenError(RuntimeError):
     """Headless Linux with no (virtual) display: restarting won't fix it."""
@@ -66,6 +75,69 @@ class NoScreenError(RuntimeError):
 
 class Blocked(Exception):
     """Apple refused the availability request."""
+
+
+def _cookie_snapshot_path(cfg: Config) -> Path:
+    return cfg.profile_dir.parent / _COOKIE_SNAPSHOT
+
+
+def _restore_cookies(ctx: BrowserContext, cfg: Config) -> None:
+    """Re-inject the cookies we snapshoted last run, as persistent cookies.
+
+    Chrome drops session cookies (no expiry) when the browser closes, which is
+    why Apple 'forgets' the sign-in between runs. We re-add them with a real
+    expiry so they persist. Existing cookies win: we only fill gaps, so a fresh
+    sign-in is never clobbered by a stale snapshot.
+    """
+    snap = _cookie_snapshot_path(cfg)
+    if not snap.exists():
+        return
+    try:
+        cookies = json.loads(snap.read_text())
+    except Exception:
+        return
+    if not cookies:
+        return
+    try:
+        existing = {(c["name"], c["domain"]) for c in ctx.cookies()}
+    except Exception:
+        existing = set()
+    to_add = [c for c in cookies if (c["name"], c["domain"]) not in existing]
+    if to_add:
+        try:
+            ctx.add_cookies(to_add)
+            log.debug("restored %d session cookie(s)", len(to_add))
+        except Exception as e:
+            log.debug("cookie restore failed (ignored): %s", e)
+
+
+def save_cookies(ctx: BrowserContext, cfg: Config) -> None:
+    """Snapshot apple.com cookies (incl. session-only ones) for the next launch.
+
+    Called on context close. Session cookies get a far-future expiry so Chrome
+    treats them as persistent next time. Never stores values in logs.
+    """
+    try:
+        cookies = ctx.cookies(["https://www.apple.com", "https://idmsa.apple.com",
+                               "https://secure7.store.apple.com"])
+    except Exception as e:
+        log.debug("cookie snapshot failed: %s", e)
+        return
+    expiry = int(time.time()) + _SESSION_COOKIE_MAX_AGE_DAYS * 86400
+    out = []
+    for c in cookies:
+        d = {
+            "name": c["name"], "value": c["value"], "domain": c["domain"],
+            "path": c.get("path", "/"), "httpOnly": c.get("httpOnly", False),
+            "secure": c.get("secure", True), "sameSite": c.get("sameSite", "Lax"),
+            # -1 / missing expiry = session cookie; give it a real one.
+            "expires": c["expires"] if c.get("expires", -1) and c["expires"] > 0 else expiry,
+        }
+        out.append(d)
+    try:
+        _cookie_snapshot_path(cfg).write_text(json.dumps(out))
+    except Exception as e:
+        log.debug("cookie snapshot write failed: %s", e)
 
 
 def open_context(pw: Playwright, cfg: Config) -> BrowserContext:
@@ -91,12 +163,18 @@ def open_context(pw: Playwright, cfg: Config) -> BrowserContext:
         args=["--disable-blink-features=AutomationControlled"],
         ignore_default_args=["--enable-automation"],
     )
+    ctx = None
     if cfg.browser_channel and cfg.browser_channel != "chromium":
         try:
-            return pw.chromium.launch_persistent_context(channel=cfg.browser_channel, **kwargs)
+            ctx = pw.chromium.launch_persistent_context(channel=cfg.browser_channel, **kwargs)
         except Exception as e:  # channel not installed
             log.warning("could not launch %s (%s); falling back to bundled Chromium", cfg.browser_channel, e)
-    return pw.chromium.launch_persistent_context(**kwargs)
+    if ctx is None:
+        ctx = pw.chromium.launch_persistent_context(**kwargs)
+    _restore_cookies(ctx, cfg)
+    # Snapshot cookies whenever the context closes so the session survives.
+    ctx.on("close", lambda c: save_cookies(c, cfg))
+    return ctx
 
 
 def _fulfillment_path(part: str, zip_code: str = "") -> str:

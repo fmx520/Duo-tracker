@@ -63,3 +63,39 @@ def test_offscreen_radio_and_label_selected_by_dom_click():
         assert page.locator('[data-autom="noapplecare"]').is_checked()
         assert page.evaluate("window.picked === true")   # page's own click handler ran
         b.close()
+
+
+RERENDER = """<!doctype html><html><body>
+<input type=radio name=dimensionColor data-autom=dimensionColornightsky>
+<input type=radio name=dimensionCapacity data-autom=dimensionCapacity512gb>
+<input type=radio name=tradeupinline data-autom=choose-noTradeIn>
+<input type=radio name=purchase_option_group data-autom=purchaseGroupOptionfullprice id=fp>
+<div id=carriers><input type=radio name=carrierModel data-autom="carrierModelUNLOCKED/US" disabled></div>
+<div id=ac><input type=radio name=applecare-options data-autom=noapplecare disabled></div>
+<script>
+  // Like Apple: picking the payment option re-renders the carrier list ~0.7s later
+  // (enabled, fresh, unchecked); AppleCare unlocks only once a carrier is picked.
+  document.getElementById('fp').addEventListener('change', () => setTimeout(() => {
+    document.getElementById('carriers').innerHTML =
+      '<input type=radio name=carrierModel data-autom="carrierModelUNLOCKED/US">';
+  }, 700));
+  document.addEventListener('change', e => {
+    if (e.target.name === 'carrierModel') document.querySelector('[data-autom=noapplecare]').disabled = false;
+  });
+</script></body></html>"""
+
+
+def test_select_config_waits_for_apples_rerendered_carrier_list():
+    """Live Mac run: carrier clicked before Apple enabled/re-rendered it, so no carrier
+    stuck, AppleCare stayed locked, and 'noapplecare' couldn't be selected."""
+    from duo_tracker.browser import select_config
+    from duo_tracker.catalog import resolve
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers")
+    with pw_api.sync_playwright() as pw:
+        b = pw.chromium.launch()
+        page = b.new_page()
+        page.set_content(RERENDER)
+        select_config(page, resolve("512gb-nightsky"), "UNLOCKED/US")
+        for a in ("carrierModelUNLOCKED/US", "noapplecare", "purchaseGroupOptionfullprice"):
+            assert page.locator(f'[data-autom="{a}"]').is_checked(), a
+        b.close()

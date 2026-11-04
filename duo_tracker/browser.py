@@ -304,17 +304,51 @@ def _check(page: Page, autom: str) -> None:
     raise RuntimeError(f"couldn't select '{autom}' on the buy page")
 
 
+def _wait_enabled(page: Page, autom: str, timeout_ms: int = 15_000) -> None:
+    """Wait until the option exists and isn't disabled. Apple keeps the carrier
+    radios disabled until a payment option is chosen, then re-renders them."""
+    page.wait_for_function(
+        "a => { const e = document.querySelector(`[data-autom=\"${a}\"]`); return !!e && !e.disabled; }",
+        arg=autom, timeout=timeout_ms)
+
+
+def _is_checked(page: Page, autom: str) -> bool:
+    try:
+        return page.locator(f'[data-autom="{autom}"]').first.is_checked(timeout=2_000)
+    except Exception:
+        return False
+
+
 def select_config(page: Page, model: Model, carrier: str) -> None:
-    for autom in (
+    """Choose colour, capacity, no trade-in, full price, carrier, no AppleCare.
+
+    Each choice unlocks/re-renders later sections (carrier stays disabled until
+    the payment option is picked; AppleCare until the carrier is). Clicking too
+    early lands on a disabled or about-to-be-replaced input, so: wait for each
+    option to be enabled, then verify the whole set stuck and redo anything a
+    re-render reset.
+    """
+    steps = (
         f"dimensionColor{model.color}",
         f"dimensionCapacity{model.capacity}",
         "choose-noTradeIn",
         "purchaseGroupOptionfullprice",
         f"carrierModel{carrier}",
         "noapplecare",
-    ):
-        _check(page, autom)
-        page.wait_for_timeout(400)
+    )
+    missing: list[str] = []
+    for attempt in range(3):
+        for autom in steps:
+            _wait_enabled(page, autom)
+            if not _is_checked(page, autom):
+                _check(page, autom)
+            page.wait_for_timeout(400)
+        page.wait_for_timeout(600)  # let the last re-render land before verifying
+        missing = [a for a in steps if not _is_checked(page, a)]
+        if not missing:
+            return
+        log.debug("buy page reset %s; selecting again (pass %d)", missing, attempt + 2)
+    raise RuntimeError(f"buy page wouldn't keep these selected: {', '.join(missing)}")
 
 
 def load_buy_page(page: Page) -> None:

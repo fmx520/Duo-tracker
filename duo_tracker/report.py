@@ -23,6 +23,10 @@ LOG_LINES = 600
 MAX_REPORTS = 3
 
 _SCRUBBERS = [
+    # Any credential-ish config value: trigger.secret, tokens, passwords, API keys.
+    (re.compile(r"(?im)^(\s*[\w.-]*(?:secret|token|password|passwd|api[_-]?key)[\w.-]*\s*[:=]\s*)"
+                r"(['\"]?)(?!\2\s*$)[^\s'\"#]+\2"), r"\1\2<secret>\2"),
+    (re.compile(r"\b[0-9a-f]{32,}\b"), "<hex-secret>"),
     (re.compile(r"[\w.+-]+@[\w-]+(\.[\w-]+)+"), "<email>"),
     (re.compile(r"(?<!\d)(?:\+?1[ .-]?)?\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}(?!\d)"), "<phone>"),
     (re.compile(r"\b\d{1,6}\s+(?:[A-Z][\w'.-]*\s+){1,4}(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Ln|Lane|"

@@ -244,7 +244,34 @@ def _page(ctx: BrowserContext) -> Page:
 
 
 def _check(page: Page, autom: str) -> None:
-    page.locator(f'[data-autom="{autom}"]').check(force=True, timeout=15_000)
+    """Select a radio on the buy page, and make sure it really took.
+
+    Apple's radios are visually hidden inputs; a forced check can fail with
+    "Element is outside of the viewport" (or silently not register -- that's how
+    AppleCare One ended up in the bag). Fall back to clicking the visible label
+    the input points at, then verify the input is actually checked.
+    """
+    inp = page.locator(f'[data-autom="{autom}"]').first
+    try:
+        inp.check(force=True, timeout=15_000)
+    except Exception as e:
+        log.debug("check(%s) failed (%s); clicking its label instead", autom, str(e).splitlines()[0])
+    if inp.is_checked():
+        return
+    labelled_by = inp.get_attribute("aria-labelledby") or ""
+    inp_id = inp.get_attribute("id") or ""
+    candidates = [f'[id="{x}"]' for x in labelled_by.split() if x] + ([f'label[for="{inp_id}"]'] if inp_id else [])
+    for sel in candidates:
+        lab = page.locator(sel).first
+        try:
+            if lab.count():
+                lab.scroll_into_view_if_needed(timeout=5_000)
+                lab.click(timeout=10_000)
+                if inp.is_checked():
+                    return
+        except Exception as e:
+            log.debug("label click %s failed: %s", sel, str(e).splitlines()[0])
+    raise RuntimeError(f"couldn't select '{autom}' on the buy page")
 
 
 def select_config(page: Page, model: Model, carrier: str) -> None:

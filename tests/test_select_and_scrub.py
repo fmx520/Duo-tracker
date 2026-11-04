@@ -36,3 +36,30 @@ def test_hidden_radio_selected_via_its_label():
         _check(page, "noapplecare")
         assert page.locator('[data-autom="noapplecare"]').is_checked()
         b.close()
+
+
+OFFSCREEN = """<!doctype html><html><body style="margin:0">
+<div style="width:300px; overflow:hidden; white-space:nowrap">
+  <div style="display:inline-block; width:2000px"></div>
+  <span style="display:inline-block; pointer-events:none">
+    <input id="r2" type="radio" name="applecare-options" data-autom="noapplecare" aria-labelledby="r2_label"
+           style="opacity:0; width:0; height:0">
+    <span id="r2_label">No AppleCare coverage</span>
+  </span>
+</div>
+<script>document.getElementById('r2').addEventListener('click', () => window.picked = true)</script>
+</body></html>"""
+
+
+def test_offscreen_radio_and_label_selected_by_dom_click():
+    """Apple's AppleCare row: radio AND label off-screen/unclickable -> 'couldn't select'."""
+    from duo_tracker.browser import _check
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers")
+    with pw_api.sync_playwright() as pw:
+        b = pw.chromium.launch()
+        page = b.new_page()
+        page.set_content(OFFSCREEN)
+        _check(page, "noapplecare")
+        assert page.locator('[data-autom="noapplecare"]').is_checked()
+        assert page.evaluate("window.picked === true")   # page's own click handler ran
+        b.close()

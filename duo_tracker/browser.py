@@ -291,6 +291,16 @@ def _check(page: Page, autom: str) -> None:
                     return
         except Exception as e:
             log.debug("label click %s failed: %s", sel, str(e).splitlines()[0])
+    # Last resort: a DOM click on the input itself. Works even when the radio and
+    # its label sit off-screen in Apple's sideways-scrolling option rows, and
+    # fires the same click/change events the page's own code listens for.
+    try:
+        inp.evaluate("e => { e.scrollIntoView({block: 'center', inline: 'center'}); e.click(); }")
+        page.wait_for_timeout(300)
+        if inp.is_checked():
+            return
+    except Exception as e:
+        log.debug("DOM click on %s failed: %s", autom, str(e).splitlines()[0])
     raise RuntimeError(f"couldn't select '{autom}' on the buy page")
 
 

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import os
 import random
 import secrets
@@ -341,15 +342,33 @@ def check_round(page: Page, models: list[Model], carrier: str, zip_code: str = "
 
 
 def go_to_bag(page: Page) -> bool:
-    """Click Add to Bag on the buy page (``model`` already selected) and open the bag."""
+    """Click Add to Bag on the buy page (``model`` already selected) and open the bag.
+
+    Apple doesn't go straight to the bag: Add to Bag sends the add request, then
+    loads an accessories page (``?step=attach``) with a "Review Bag" button.
+    Wait for that (or the bag) before moving on -- jumping to the bag the
+    instant after the click raced the add request.
+    """
+    start_url = page.url
     try:
         page.locator('[data-autom="add-to-cart"]').click(timeout=15_000)
-        page.wait_for_load_state("domcontentloaded", timeout=30_000)
+    except PWTimeout:
+        page.bring_to_front()
+        return False
+    try:
+        page.wait_for_url(lambda u: u != start_url and ("step=attach" in u or "/shop/bag" in u), timeout=30_000)
     except PWTimeout:
         page.bring_to_front()
         return False
     if "/shop/bag" not in page.url:
-        page.goto(BAG_URL, wait_until="domcontentloaded", timeout=60_000)
+        review = page.get_by_role("link", name=re.compile(r"review bag", re.I)).or_(
+            page.get_by_role("button", name=re.compile(r"review bag", re.I))).first
+        try:
+            review.click(timeout=15_000)
+            page.wait_for_url(lambda u: "/shop/bag" in u, timeout=30_000)
+        except PWTimeout:
+            page.goto(BAG_URL, wait_until="domcontentloaded", timeout=60_000)
+    page.wait_for_load_state("domcontentloaded", timeout=30_000)
     page.bring_to_front()
     return True
 

@@ -33,8 +33,9 @@ PAGE = ("<!doctype html><html><head><title>{title}</title></head><body>{body}"
 
 class FakeApple:
     def __init__(self, *, cvv=False, signin=False, tax_rate=0.08875, stores=("R095", "R001"), extra_qty=0,
-                 undo_banner=False):
+                 undo_banner=False, attach_step=False):
         self.undo_banner, self.undos, self.last_removed = undo_banner, 0, None
+        self.attach_step = attach_step
         self.items, self.orders = [], []
         self.cvv, self.signin, self.tax_rate, self.stores, self.extra_qty = cvv, signin, tax_rate, stores, extra_qty
         self.store = None
@@ -51,6 +52,13 @@ class FakeApple:
         if path == "/beacon":
             return route.fulfill(status=204, body="")
         if path == "/shop/buy-iphone/iphone-duo":
+            if self.attach_step and q.get("step") == "attach":
+                self.items.append(q["product"])  # the add only lands when this page loads
+                return html("Shop iPhone Duo", "<h2>Accessories you'll love.</h2>"
+                            "<a href='/shop/bag'>Review Bag</a>")
+            if self.attach_step:  # Apple: async add request, then the attach page ~1s later
+                return html("Buy iPhone Duo", f"""<button data-autom="add-to-cart" onclick="setTimeout(() =>
+                    location.href='/shop/buy-iphone/iphone-duo?step=attach&product={MODEL.part}', 800)">Add to Bag</button>""")
             return html("Buy iPhone Duo", f"""<button data-autom="add-to-cart"
                 onclick="location.href='/shop/bag?added={MODEL.part}'">Add to Bag</button>""")
         if path.startswith("/shop/product/"):
@@ -465,3 +473,16 @@ def test_signed_in_session_passing_through_signin_url_is_signed_in(browser):
     ctx = browser.new_context()
     ctx.route("**/*", _apple_signin_route(signed_in=True))
     assert signed_in(ctx.new_page(), settle_seconds=5) is True
+
+
+def test_add_to_bag_goes_through_apples_attach_page(browser):
+    """Apple: Add to Bag -> '?step=attach' accessories page with 'Review Bag'.
+    Jumping to /shop/bag right after the click raced the add and lost the phone."""
+    fake = FakeApple(attach_step=True)
+    ctx = browser.new_context()
+    ctx.route("**/*", fake.handle)
+    page = ctx.new_page()
+    page.goto("https://www.apple.com/shop/buy-iphone/iphone-duo")
+    assert go_to_bag(page)
+    assert "/shop/bag" in page.url and fake.items == [MODEL.part]
+    assert "Your bag" in page.locator("body").inner_text()

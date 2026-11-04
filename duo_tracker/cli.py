@@ -183,9 +183,10 @@ def cmd_init(args, input_fn=input) -> int:
 
 
 def cmd_setup(args) -> int:
+    from playwright.sync_api import TimeoutError as PWTimeoutError
     from playwright.sync_api import sync_playwright
 
-    from .browser import open_context, _page
+    from .browser import open_context, save_cookies, _page
     from .config import load
 
     cfg = load(args.config)
@@ -202,7 +203,26 @@ def cmd_setup(args) -> int:
             "  3. Make sure a payment method is saved in your Apple Account (Apple Pay or card).\n"
             "  4. Close the browser window when done.\n"
         )
-        ctx.wait_for_event("close", timeout=0)
+        # Apple's sign-in cookies (idmsa `aa`/`aasp`) are session-only — Chrome deletes
+        # them the moment the window closes. Snapshot them every few seconds while the
+        # browser is still open so the next run can restore them. A "close" event fires
+        # too late for this: by then the browser is unreachable and reads come back empty.
+        saved = 0
+        while True:
+            try:
+                ctx.wait_for_event("close", timeout=10_000)
+                break
+            except PWTimeoutError:
+                pass  # still open — take another snapshot
+            try:
+                saved = save_cookies(ctx, cfg) or saved
+            except Exception:
+                pass
+        if saved:
+            say(f"✔ saved {saved} cookies — the next run will restore your sign-in from them.")
+        else:
+            say("Couldn't capture any cookies — sign-in may not carry over to the next run.",
+                logging.WARNING)
     say(f"Saved to {cfg.profile_dir}. Next: python -m duo_tracker check")
     return 0
 
@@ -250,7 +270,7 @@ def cmd_watch(args) -> int:
     from playwright.sync_api import sync_playwright
 
     from .availability import hit_keys, matching_stores
-    from .browser import Blocked, check_round, decoy_fetch, open_context, _page, sleep_with_status
+    from .browser import Blocked, check_round, decoy_fetch, open_context, save_cookies, _page, sleep_with_status
     from .checkout import empty_bag, order_lock, rehearsal_ok, signed_in
     from .checkout import STATE_DIR
     from .config import load
@@ -315,6 +335,8 @@ def cmd_watch(args) -> int:
                     last_signin_check = time.monotonic()
                     try:
                         ok = signed_in(page)
+                        if ok:
+                            save_cookies(ctx, cfg)  # refresh the snapshot while signed in
                     except Exception as e:
                         ok = True  # couldn't tell; don't cry wolf
                         say(f"sign-in check failed: {e}", logging.WARNING, exc=e)
@@ -804,7 +826,7 @@ def cmd_rehearse(args) -> int:
     """Walk the full checkout without placing anything; arms `submit` mode on success."""
     from playwright.sync_api import sync_playwright
 
-    from .browser import go_to_bag, load_buy_page, open_context, select_config, _page
+    from .browser import go_to_bag, load_buy_page, open_context, save_cookies, select_config, _page
     from .checkout import CheckoutStopped, Plan, empty_bag, format_timings, record_rehearsal, run, signed_in
     from .config import load
 
@@ -818,6 +840,7 @@ def cmd_rehearse(args) -> int:
             if not signed_in(page):
                 raise CheckoutStopped("sign-in", "not signed in to Apple — run `setup` first")
             say("    ✔ signed in to Apple")
+            save_cookies(ctx, cfg)  # snapshot the live session before anything can crash
             empty_bag(page)
             say(f"1/2 delivery rehearsal with {model.name} (stops on the review page, never orders)…")
             load_buy_page(page)
@@ -950,7 +973,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.cmd == "watch":
                 _notify_crash(args.config, e)
             return 1
-        log.error("error: %s", e)
+        log.error("error: e")
         log.debug("details", exc_info=True)
         return EXIT_NO_RESTART
     except KeyboardInterrupt:

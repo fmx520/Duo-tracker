@@ -279,14 +279,24 @@ def find_first(page: Page, options: dict, timeout: float = STEP_TIMEOUT_S):
 
 # ── bag ───────────────────────────────────────────────────────────────────────
 def empty_bag(page: Page) -> int:
-    """Remove everything from the bag. Returns how many items were removed."""
-    page.goto(BAG_URL, wait_until="domcontentloaded", timeout=60_000)
+    """Remove everything from the bag. Returns how many items were removed.
+
+    Crash-safe: if the window is closed mid-removal (user closed it, or a
+    TargetClosedError), stop quietly instead of killing the whole run.
+    """
+    try:
+        page.goto(BAG_URL, wait_until="domcontentloaded", timeout=60_000)
+    except Exception:
+        return 0
     removed = 0
     for _ in range(10):
-        btn = find_visible(page, REMOVE_BTN, timeout=3)
-        if not btn:
+        try:
+            btn = find_visible(page, REMOVE_BTN, timeout=3)
+            if not btn:
+                break
+            _click_and_settle(page, btn)
+        except Exception:
             break
-        _click_and_settle(page, btn)
         removed += 1
     return removed
 

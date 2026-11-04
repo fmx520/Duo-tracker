@@ -63,3 +63,50 @@ def test_restore_injects_snapshot_and_preserves_existing(browser_inst, tmp_path)
     assert idmsa.get("aa") == "sess"           # injected
     assert cookies.get("s_fid") == "fresh"      # not clobbered
     ctx.close()
+
+
+def test_setup_snapshots_cookies_while_window_is_open(monkeypatch, tmp_path):
+    """cmd_setup must snapshot cookies on a poll loop — a 'close' event fires
+    after the browser is already unreachable, so saving there captures nothing."""
+    from types import SimpleNamespace
+
+    from playwright.sync_api import TimeoutError as PWTimeoutError
+
+    from duo_tracker import browser, cli, config
+
+    cfg = SimpleNamespace(profile_dir=tmp_path / "prof", zip="11754")
+    cfg.profile_dir.mkdir()
+    calls = {"save": 0, "waits": 0}
+
+    class FakePage:
+        def goto(self, url):
+            pass
+
+    class FakeCtx:
+        def wait_for_event(self, event, timeout=0):
+            calls["waits"] += 1
+            if calls["waits"] < 3:
+                raise PWTimeoutError("still open")
+            return None  # window closed
+
+    class FakePW:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr("playwright.sync_api.sync_playwright", lambda: FakePW())
+    monkeypatch.setattr(config, "load", lambda path: cfg)
+    monkeypatch.setattr(browser, "open_context", lambda pw, c: FakeCtx())
+    monkeypatch.setattr(browser, "_page", lambda ctx: FakePage())
+
+    def fake_save(ctx, c):
+        calls["save"] += 1
+        return 5
+
+    monkeypatch.setattr(browser, "save_cookies", fake_save)
+
+    args = SimpleNamespace(config=str(tmp_path / "config.yaml"))
+    assert cli.cmd_setup(args) == 0
+    assert calls["save"] == 2  # one snapshot per poll before the window closed

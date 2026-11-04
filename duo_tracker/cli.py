@@ -842,6 +842,7 @@ def cmd_rehearse(args) -> int:
             say("    ✔ signed in to Apple")
             save_cookies(ctx, cfg)  # snapshot the live session before anything can crash
             empty_bag(page)
+            _require_open(page)  # empty_bag skips quietly if the window was closed; don't carry on blind
             say(f"1/2 delivery rehearsal with {model.name} (stops on the review page, never orders)…")
             load_buy_page(page)
             select_config(page, model, cfg.carrier)
@@ -855,6 +856,7 @@ def cmd_rehearse(args) -> int:
             if args.pickup_item_url:
                 say("2/2 pickup rehearsal with the accessory you gave (stops on review)…")
                 empty_bag(page)
+                _require_open(page)
                 page.goto(args.pickup_item_url, wait_until="domcontentloaded", timeout=60_000)
                 if not go_to_bag(page):
                     raise CheckoutStopped("accessory page", "couldn't click Add to Bag")
@@ -915,6 +917,17 @@ def cmd_report(args) -> int:
     return 0
 
 
+def browser_closed(e: BaseException) -> bool:
+    """True when Playwright failed because the bot's Chrome window/browser is gone."""
+    return type(e).__name__ == "TargetClosedError" or "has been closed" in str(e)
+
+
+def _require_open(page) -> None:
+    from .checkout import CheckoutStopped
+    if page.is_closed():
+        raise CheckoutStopped("browser", "the bot's Chrome window was closed — leave it open while this runs")
+
+
 def _notify_crash(config_path: str, e: BaseException) -> None:
     try:
         from .config import load
@@ -968,12 +981,19 @@ def main(argv: list[str] | None = None) -> int:
         return args.fn(args)
     except Exception as e:
         from .browser import NoScreenError
+        if browser_closed(e):
+            log.error("The bot's Chrome window closed before `%s` finished. Leave that window open while it "
+                      "runs (minimize it if you like) and run the command again.", args.cmd)
+            log.debug("details", exc_info=True)
+            if args.cmd == "watch":
+                _notify_crash(args.config, e)
+            return 1
         if not isinstance(e, (ValueError, KeyError, FileNotFoundError, NoScreenError)):
             log.critical("crashed: %s: %s", type(e).__name__, e, exc_info=True)
             if args.cmd == "watch":
                 _notify_crash(args.config, e)
             return 1
-        log.error("error: e")
+        log.error("error: %s", e)
         log.debug("details", exc_info=True)
         return EXIT_NO_RESTART
     except KeyboardInterrupt:

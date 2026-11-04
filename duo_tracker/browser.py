@@ -60,13 +60,17 @@ RETRY_BUDGET_SECONDS = 75
 # How often (in watch rounds) to mix in a decoy request for a model we don't want.
 DECOY_EVERY_ROUNDS = 10
 
-# Cookies we keep alive across browser restarts. Apple marks its auth/session
-# cookies as session-only (no expiry), so Chrome deletes them on exit and every
-# run starts signed out of checkout. We snapshot them on close and re-inject
-# them with a real expiry at launch, so the login survives. Session cookies
-# only -- we deliberately do NOT capture anything else.
+# Apple marks its auth cookies (idmsa.apple.com "aa"/"aasp") as session-only
+# (no expiry), so Chrome deletes them on exit and every run starts signed out
+# of checkout. We snapshot them to disk while the browser is ALIVE and re-inject
+# them with a real expiry at launch, so the login survives restarts.
+#
+# The snapshot must be taken while the context is live: a "close" event fires
+# only after the browser is unreachable, so cookies read there come back empty.
 _COOKIE_SNAPSHOT = "cookies.json"
 _SESSION_COOKIE_MAX_AGE_DAYS = 30
+_COOKIE_HOSTS = ["https://www.apple.com", "https://idmsa.apple.com",
+                 "https://secure7.store.apple.com"]
 
 
 class NoScreenError(RuntimeError):
@@ -82,7 +86,7 @@ def _cookie_snapshot_path(cfg: Config) -> Path:
 
 
 def _restore_cookies(ctx: BrowserContext, cfg: Config) -> None:
-    """Re-inject the cookies we snapshoted last run, as persistent cookies.
+    """Re-inject the cookies we snapshotted last run, as persistent cookies.
 
     Chrome drops session cookies (no expiry) when the browser closes, which is
     why Apple 'forgets' the sign-in between runs. We re-add them with a real
@@ -111,33 +115,38 @@ def _restore_cookies(ctx: BrowserContext, cfg: Config) -> None:
             log.debug("cookie restore failed (ignored): %s", e)
 
 
-def save_cookies(ctx: BrowserContext, cfg: Config) -> None:
+def save_cookies(ctx: BrowserContext, cfg: Config) -> int:
     """Snapshot apple.com cookies (incl. session-only ones) for the next launch.
 
-    Called on context close. Session cookies get a far-future expiry so Chrome
-    treats them as persistent next time. Never stores values in logs.
+    MUST be called while the context is alive. Session cookies get a far-future
+    expiry so Chrome treats them as persistent next time. Returns how many were
+    saved; 0 means the browser was already gone and nothing was written.
+    Never stores values in logs.
     """
     try:
-        cookies = ctx.cookies(["https://www.apple.com", "https://idmsa.apple.com",
-                               "https://secure7.store.apple.com"])
+        cookies = ctx.cookies(_COOKIE_HOSTS)
     except Exception as e:
         log.debug("cookie snapshot failed: %s", e)
-        return
+        return 0
+    if not cookies:
+        return 0
     expiry = int(time.time()) + _SESSION_COOKIE_MAX_AGE_DAYS * 86400
     out = []
     for c in cookies:
-        d = {
+        out.append({
             "name": c["name"], "value": c["value"], "domain": c["domain"],
             "path": c.get("path", "/"), "httpOnly": c.get("httpOnly", False),
             "secure": c.get("secure", True), "sameSite": c.get("sameSite", "Lax"),
             # -1 / missing expiry = session cookie; give it a real one.
             "expires": c["expires"] if c.get("expires", -1) and c["expires"] > 0 else expiry,
-        }
-        out.append(d)
+        })
     try:
         _cookie_snapshot_path(cfg).write_text(json.dumps(out))
+        log.debug("snapshot %d cookie(s)", len(out))
     except Exception as e:
         log.debug("cookie snapshot write failed: %s", e)
+        return 0
+    return len(out)
 
 
 def open_context(pw: Playwright, cfg: Config) -> BrowserContext:
@@ -172,8 +181,6 @@ def open_context(pw: Playwright, cfg: Config) -> BrowserContext:
     if ctx is None:
         ctx = pw.chromium.launch_persistent_context(**kwargs)
     _restore_cookies(ctx, cfg)
-    # Snapshot cookies whenever the context closes so the session survives.
-    ctx.on("close", lambda c: save_cookies(c, cfg))
     return ctx
 
 

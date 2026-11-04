@@ -291,7 +291,9 @@ def empty_bag(page: Page) -> int:
     removed = 0
     for _ in range(10):
         try:
-            btn = find_visible(page, REMOVE_BTN, timeout=3)
+            if BAG_EMPTY_TEXT.search(body_text(page)):
+                break
+            btn = _find_remove_button(page, timeout=3)
             if not btn:
                 break
             _click_and_settle(page, btn)
@@ -299,6 +301,42 @@ def empty_bag(page: Page) -> int:
             break
         removed += 1
     return removed
+
+
+BAG_EMPTY_TEXT = re.compile(r"your bag is empty", re.I)
+
+
+def _find_remove_button(page: Page, timeout: float = 3) -> Locator | None:
+    """A visible control actually labelled "Remove" — never the "Undo" link.
+
+    After a removal Apple shows "<item> removed from your bag. Undo", and the
+    Undo control's data-autom also contains "remove". Clicking it re-adds the
+    item, so a plain [data-autom*=remove] match flip-flopped the bag forever.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        for loc in _candidates(page, REMOVE_BTN):
+            try:
+                n = loc.count()
+            except Exception:
+                n = 0
+            for i in range(min(n, 8)):
+                el = loc.nth(i)
+                try:
+                    if not (el.is_visible() and el.is_enabled()):
+                        continue
+                    label = " ".join(filter(None, [el.inner_text(timeout=1000), el.get_attribute("aria-label") or "",
+                                                   el.get_attribute("data-autom") or ""]))
+                except Exception:
+                    continue
+                if re.search(r"undo", label, re.I):
+                    continue
+                if re.match(r"\s*Remove\b", el.inner_text(timeout=1000) or "", re.I) or \
+                        re.match(r"\s*Remove\b", el.get_attribute("aria-label") or "", re.I):
+                    return el
+        if time.monotonic() >= deadline:
+            return None
+        page.wait_for_timeout(150)
 
 
 def _bag_item_quantities(page: Page) -> list[int]:

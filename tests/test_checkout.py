@@ -31,7 +31,9 @@ PAGE = ("<!doctype html><html><head><title>{title}</title></head><body>{body}"
 
 
 class FakeApple:
-    def __init__(self, *, cvv=False, signin=False, tax_rate=0.08875, stores=("R095", "R001"), extra_qty=0):
+    def __init__(self, *, cvv=False, signin=False, tax_rate=0.08875, stores=("R095", "R001"), extra_qty=0,
+                 undo_banner=False):
+        self.undo_banner, self.undos, self.last_removed = undo_banner, 0, None
         self.items, self.orders = [], []
         self.cvv, self.signin, self.tax_rate, self.stores, self.extra_qty = cvv, signin, tax_rate, stores, extra_qty
         self.store = None
@@ -56,14 +58,25 @@ class FakeApple:
         if path == "/shop/bag":
             if "added" in q:
                 self.items += [q["added"]] * (1 + self.extra_qty)
+            banner = ""
             if "remove" in q and self.items:
-                self.items.pop(0)
+                self.last_removed = self.items.pop(0)
+                if self.undo_banner:  # Apple: "<item> removed from your bag. … Undo" — Undo re-adds it
+                    banner = (f"<div>{NAMES[self.last_removed]} removed from your bag. "
+                              "<a data-autom='bag-undo-remove-link' href='/shop/bag?undo=1'>Undo</a></div>")
+            if "undo" in q and self.last_removed:
+                self.undos += 1
+                self.items.append(self.last_removed)
+                self.last_removed = None
+            if not self.items:
+                return html("Bag", f"{banner}<h1>Your bag is empty.</h1>"
+                                   "<a href='/shop/accessories'>Continue Shopping</a>")
             rows = "".join(
                 f"<div data-autom='bag-item-{i}'>{NAMES[p]} "
                 f"<button data-autom='bag-item-remove-button'"
                 f" onclick=\"location.href='/shop/bag?remove=1'\">Remove</button></div>"
                 for i, p in enumerate(self.items))
-            return html("Bag", f"<h1>Your bag</h1>{rows}<a href='/shop/accessories'>Continue Shopping</a>"
+            return html("Bag", f"{banner}<h1>Your bag</h1>{rows}<a href='/shop/accessories'>Continue Shopping</a>"
                                "<button data-autom='checkout' onclick=\"location.href='/shop/checkout?_s=Fulfillment'\">Check Out</button>")
         if path == "/signin":
             return html("Sign in", "<input type=email><input type=password><button>Continue</button>")
@@ -392,3 +405,15 @@ def test_signed_in_account_page_with_phone_field_is_signed_in(browser):
     ctx = browser.new_context()
     ctx.route("**/*", _account_with_phone_route())
     assert signed_in(ctx.new_page()) is True
+
+
+def test_empty_bag_never_clicks_undo(browser):
+    """Apple shows '<item> removed from your bag. Undo' after each removal. The
+    Undo control's data-autom contains 'remove'; clicking it re-adds the phone
+    and the bot flip-flopped between a full and an empty bag."""
+    fake = FakeApple(extra_qty=1, undo_banner=True)
+    page = open_page(browser, fake)
+    assert len(fake.items) == 2
+    assert empty_bag(page) == 2
+    assert fake.items == [] and fake.undos == 0
+    assert empty_bag(page) == 0 and fake.undos == 0   # already empty: nothing to click, no Undo
